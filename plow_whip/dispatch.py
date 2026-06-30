@@ -204,10 +204,12 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
 3. 清空 ~/.plow-whip/inbox/codex.json 中对应任务"""
     
     cmd = [
-        "codex",
-        "-q", full_prompt,
-        "--cwd", project_path,
-        "--full-auto",
+        "npx", "@openai/codex",
+        "-a", "never",       # 不自动审批
+        "-s", "workspace-write",  # 沙箱模式
+        "-C", project_path,  # 工作目录
+        "exec", "--ephemeral",  # 一次性执行
+        full_prompt,
     ]
     
     try:
@@ -231,7 +233,7 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
     except subprocess.TimeoutExpired:
         return {"success": False, "channel": "codex_cli", "detail": "codex 超时 (5分钟)"}
     except FileNotFoundError:
-        return {"success": False, "channel": "codex_cli", "detail": "codex 未安装"}
+        return {"success": False, "channel": "codex_cli", "detail": "npx 或 @openai/codex 未安装"}
 
 
 def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
