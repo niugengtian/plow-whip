@@ -623,6 +623,15 @@ def main():
     whip_parser.add_argument("--daemon", action="store_true", help="Continuous monitoring mode")
     whip_parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval in seconds (default 300)")
 
+
+    # permit 子命令
+    permit_parser = sub.add_parser("permit", help="Set dispatch permission")
+    permit_parser.add_argument("action", choices=["allow", "allow_n", "ask", "ask_n", "reject", "check"],
+                               help="Permission mode")
+    permit_parser.add_argument("--count", type=int, default=1,
+                               help="Number of tasks (for allow_n / ask_n)")
+    permit_parser.set_defaults(func=cmd_permit)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -642,6 +651,9 @@ def main():
     if args.command == "whip":
         from .whip import cmd_whip
         cmd_whip(args)
+        return
+    if args.command == "permit":
+        cmd_permit(args)
         return
 
     # Other commands need --project
@@ -678,3 +690,27 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ── permit 命令 ──────────────────────────────────────────────────────────────
+
+def cmd_permit(args):
+    """处理 permit 子命令：设置 dispatch 权限"""
+    from .dispatch import set_permission, check_permission, PERMISSION_MODES
+    
+    if args.action == "check":
+        result = check_permission()
+        print(f"当前权限: {result['action']} — {result['reason']}")
+        return
+    
+    mode = args.action  # allow | allow_n | ask | ask_n | reject
+    count = getattr(args, "count", 1) or 1
+    
+    if mode in ("allow_n", "ask_n") and count < 1:
+        print("错误: count 必须 >= 1")
+        return
+    
+    result = set_permission(mode, count)
+    print(f"✅ 权限已设置: {PERMISSION_MODES.get(mode, mode)}")
+    if mode in ("allow_n", "ask_n"):
+        print(f"   次数: {count}")

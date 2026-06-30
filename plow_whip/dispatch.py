@@ -30,6 +30,94 @@ INBOX_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip", "inbox")
 def _ensure_inbox():
     os.makedirs(INBOX_DIR, exist_ok=True)
 
+# ── 权限控制 ──────────────────────────────────────────────────────────────────
+
+# 权限模式
+PERMISSION_MODES = {
+    "allow": "本次允许",
+    "allow_n": "后面 N 个允许",
+    "ask": "本次需要询问",
+    "ask_n": "后面 N 个需要询问",
+    "reject": "本次拒绝",
+}
+
+# 权限状态（存储在 ~/.plow-whip/permissions.json）
+_permission_state = {
+    "allow_remaining": 0,  # 剩余允许次数
+    "ask_remaining": 0,    # 剩余询问次数
+}
+
+def _load_permissions():
+    """加载权限状态"""
+    global _permission_state
+    perm_file = os.path.join(os.path.expanduser("~"), ".plow-whip", "permissions.json")
+    if os.path.exists(perm_file):
+        try:
+            with open(perm_file, encoding="utf-8") as f:
+                _permission_state.update(json.load(f))
+        except (json.JSONDecodeError, IOError):
+            pass
+    return _permission_state
+
+def _save_permissions():
+    """保存权限状态"""
+    perm_dir = os.path.join(os.path.expanduser("~"), ".plow-whip")
+    os.makedirs(perm_dir, exist_ok=True)
+    perm_file = os.path.join(perm_dir, "permissions.json")
+    with open(perm_file, "w", encoding="utf-8") as f:
+        json.dump(_permission_state, f, ensure_ascii=False, indent=2)
+
+def set_permission(mode: str, count: int = 1):
+    """
+    设置权限模式
+    
+    参数:
+      mode: allow | allow_n | ask | ask_n | reject
+      count: 用于 allow_n / ask_n 的次数
+    """
+    _load_permissions()
+    if mode == "allow":
+        _permission_state["allow_remaining"] = 1
+        _permission_state["ask_remaining"] = 0
+    elif mode == "allow_n":
+        _permission_state["allow_remaining"] = count
+        _permission_state["ask_remaining"] = 0
+    elif mode == "ask":
+        _permission_state["allow_remaining"] = 0
+        _permission_state["ask_remaining"] = 1
+    elif mode == "ask_n":
+        _permission_state["allow_remaining"] = 0
+        _permission_state["ask_remaining"] = count
+    elif mode == "reject":
+        _permission_state["allow_remaining"] = 0
+        _permission_state["ask_remaining"] = 0
+    _save_permissions()
+    return {"mode": mode, "count": count}
+
+def check_permission() -> dict:
+    """
+    检查当前权限状态
+    
+    返回:
+      {"action": "allow" | "ask" | "reject", "reason": str}
+    """
+    _load_permissions()
+    
+    if _permission_state["allow_remaining"] > 0:
+        _permission_state["allow_remaining"] -= 1
+        _save_permissions()
+        return {"action": "allow", "reason": f"允许（剩余 {_permission_state['allow_remaining']} 次）"}
+    
+    if _permission_state["ask_remaining"] > 0:
+        _permission_state["ask_remaining"] -= 1
+        _save_permissions()
+        return {"action": "ask", "reason": f"需要询问（剩余 {_permission_state['ask_remaining']} 次）"}
+    
+    # 默认需要询问
+    return {"action": "ask", "reason": "默认需要确认"}
+
+
+
 
 # ── 检测可用通道 ─────────────────────────────────────────────────────────────
 
