@@ -19,6 +19,7 @@ import sys
 from datetime import datetime
 
 from . import agent_flow as af
+from .brain import Brain, classify_complexity
 
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
@@ -173,6 +174,9 @@ def available_channels(agent: str) -> list:
     if _agent_cli_available(agent):
         channels.append("cli")
     
+    # Brain 通道（简单任务直接完成）
+    channels.append("brain")
+
     # 兜底通道
     channels.append("file")
     channels.append("notify")
@@ -214,7 +218,7 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
         return {"success": False, "channel": "zellij", "detail": "zellij 未安装"}
 
 
-def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
+def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 300) -> dict:
     """
     通过 qoderclicn Print 模式直接唤醒 Qoder CLI 执行任务。
     这是真正的自动唤醒——不需要人点，脚本直接调。
@@ -249,7 +253,7 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
         result = subprocess.run(
             cmd,
             capture_output=True, text=True,
-            timeout=timeout,  # 默认 30 分钟
+            timeout=timeout,  # 默认 5 分钟
         )
         if result.returncode == 0:
             return {
@@ -305,7 +309,7 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout:
         result = subprocess.run(
             cmd,
             capture_output=True, text=True,
-            timeout=timeout,  # 默认 30 分钟
+            timeout=timeout,  # 默认 5 分钟
         )
         if result.returncode == 0:
             return {
@@ -325,6 +329,50 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout:
     except FileNotFoundError:
         return {"success": False, "channel": "codex_cli", "detail": "npx 或 @openai/codex 未安装"}
 
+
+
+
+def _dispatch_brain(agent: str, prompt: str, project: str) -> dict:
+    """
+    用 DeepSeek Brain 处理简单任务。
+    如果任务简单，Brain 直接完成；否则返回失败让其他通道接手。
+    """
+    brain = Brain()
+    if not brain.available:
+        return {"success": False, "channel": "brain", "detail": "DeepSeek 不可用"}
+
+    # 构造带项目上下文的 task
+    projects_dir = af.get_projects_dir()
+    project_path = os.path.join(projects_dir, project)
+    context = f"项目: {project}\n路径: {project_path}\n当前 agent: {agent}"
+
+    result = brain.think(prompt, context)
+
+    if result["routed"] == "deepseek":
+        # Brain 完成了任务！把结果写入 agent 的会话和 inbox
+        output = result["output"]
+        complexity = result["complexity"]
+
+        # 写入 agent 的会话记录
+        conv_dir = af.conversations_dir(project)
+        agent_dir = os.path.join(conv_dir, agent)
+        if os.path.isdir(agent_dir):
+            brain_log = os.path.join(agent_dir, "brain_results.md")
+            with open(brain_log, "a", encoding="utf-8") as f:
+                f.write(f"\n## Brain Result ({datetime.now().strftime('%H:%M:%S')})\n")
+                f.write(f"**Task:** {prompt[:100]}...\n")
+                f.write(f"**Complexity:** {complexity['level']} (score={complexity['score']})\n\n")
+                f.write(output)
+                f.write("\n\n---\n")
+
+        return {
+            "success": True,
+            "channel": "brain",
+            "detail": f"DeepSeek 完成 (score={complexity['score']})",
+            "output": output,
+        }
+    else:
+        return {"success": False, "channel": "brain", "detail": result["reason"]}
 
 def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
     """
@@ -380,15 +428,23 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     返回:
       {"success": bool, "channel": str, "detail": str}
     """
+    use_brain = kwargs.pop("use_brain", False)
+
     if force_channel:
         channels = [force_channel]
     else:
         channels = available_channels(agent)
+        # Brain 通道只在显式启用时使用
+        if not use_brain:
+            channels = [ch for ch in channels if ch != "brain"]
 
     for ch in channels:
-        if ch == "qoder_cli":
+        if ch == "brain":
+            result = _dispatch_brain(agent, prompt, project)
+        elif ch == "qoder_cli":
             max_turns = kwargs.get("max_turns", 20)
-            result = _dispatch_qoder_cli(prompt, project, max_turns)
+            timeout = kwargs.get("timeout", 300)
+            result = _dispatch_qoder_cli(prompt, project, max_turns, timeout)
         elif ch == "codex_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 1800)

@@ -879,6 +879,12 @@ def main():
     mr = sub.add_parser("memory-rotate", help="Check and rotate all collab/memory files")
     mr.add_argument("--scan", action="store_true", help="Scan only, show activity without rotating")
 
+    # brain — DeepSeek 廉价大脑
+    brain_parser = sub.add_parser("brain", help="DeepSeek brain for simple tasks")
+    brain_parser.add_argument("task", help="Task description")
+    brain_parser.add_argument("--context", help="Additional context")
+    brain_parser.add_argument("--force", action="store_true", help="Force DeepSeek for complex tasks")
+
     # sync
     sub.add_parser("sync", help="Sync framework templates to all projects")
 
@@ -899,6 +905,7 @@ def main():
     whip_parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval in seconds (default 300)")
     whip_parser.add_argument("--force", action="store_true", help="Force dispatch even if project is not stale")
     whip_parser.add_argument("--auto-rotate", action="store_true", help="Auto-rotate sessions that exceed size thresholds")
+    whip_parser.add_argument("--brain", action="store_true", help="Use DeepSeek brain for simple tasks before dispatching")
 
 
     # permit 子命令
@@ -921,6 +928,10 @@ def main():
         return
     if args.command == "list":
         cmd_list()
+        return
+    if args.command == "brain":
+        from .brain import cmd_brain
+        cmd_brain(args)
         return
     if args.command == "sync":
         cmd_sync()

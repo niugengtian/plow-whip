@@ -188,9 +188,10 @@ def cmd_whip(args):
     force_channel = getattr(args, "channel", None)
 
     auto_rotate = getattr(args, 'auto_rotate', False)
+    use_brain = getattr(args, 'brain', False)
 
     if auto_crack:
-        _auto_crack_loop(stale_minutes, target_agent, daemon_interval, force_channel, auto_rotate=auto_rotate)
+        _auto_crack_loop(stale_minutes, target_agent, daemon_interval, force_channel, auto_rotate=auto_rotate, use_brain=use_brain)
         return
 
     results = scan_all_projects(stale_minutes)
@@ -260,7 +261,7 @@ def _print_whip_report(results: list):
         af.notify(f"{stale_count} 个项目需要鞭策!", ring=True)
 
 
-def _crack(results: list, force_channel: str = None, force: bool = False):
+def _crack(results: list, force_channel: str = None, force: bool = False, use_brain: bool = False):
     """
     抽鞭子！将任务投递给每个摸鱼的 agent。
     对每个 stale 项目，生成 prompt 并通过 dispatch 投递。
@@ -283,13 +284,16 @@ def _crack(results: list, force_channel: str = None, force: bool = False):
 
         # 投递（如果项目绑定了 zellij tab，精准投递）
         zellij_tab = r.get("zellij_tab")
-        result = dispatch(agent, project, prompt, force_channel, target_tab=zellij_tab)
+        dispatch_kwargs = {"target_tab": zellij_tab}
+        if use_brain:
+            dispatch_kwargs["use_brain"] = True
+        result = dispatch(agent, project, prompt, force_channel, **dispatch_kwargs)
         status = "OK" if result["success"] else "FAIL"
         print(f"    [{status}] {result['channel']}: {result['detail']}")
         print()
 
 
-def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_rotate=False):
+def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_rotate=False, use_brain=False):
     """
     自动挥舞模式：持续扫描，发现摸鱼就自动抽鞭。
     这是真正的"上帝之鞭" — 不需要人介入，自动驱动 agent 干活。
@@ -303,6 +307,8 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_
         print(f"   通道: 强制 {force_channel}")
     if auto_rotate:
         print(f"   ✂️  自动轮转: 已启用")
+    if use_brain:
+        print(f"   🧠 DeepSeek Brain: 已启用")
     print("   Ctrl+C 收起鞭子\n")
 
     try:
@@ -321,7 +327,7 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_
             if stale:
                 now = datetime.now().strftime("%H:%M:%S")
                 print(f"\n[{now}] 发现 {len(stale)} 个摸鱼项目，抽鞭中...")
-                _crack(stale, force_channel)
+                _crack(stale, force_channel, use_brain=use_brain)
             else:
                 now = datetime.now().strftime("%H:%M:%S")
                 print(f"[{now}] 暂无摸鱼项目，鞭子休息中")
