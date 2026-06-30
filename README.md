@@ -1,145 +1,236 @@
-# 🪢 Plow-Whip — 耕田之鞭
+# 🪢 plow-whip
 
-**Multi-Agent Collaboration Framework / 多Agent协作工具**
+> **v1.0.0** — 多 Agent 协作的鞭策引擎 / Multi-Agent Collaboration Whip Engine
 
-[English](#english) | [中文](#中文)
+[English](#english) | [中文](#chinese)
 
 ---
 
-<a id="english"></a>
-## 🇬🇧 English
+## 中文
 
-### What is Plow-Whip?
+### 简介
 
-Plow-Whip is a lightweight framework for orchestrating multiple AI coding agents (Codex, Cursor, Qoder, ChatGPT, etc.) on a single project. It provides:
+plow-whip（耕田之鞭）是一个多 Agent 协作框架，管理 **4 Agent 阵容**，通过 **whip（上帝之鞭）** 驱动摸鱼 Agent，用 **DeepSeek 廉价大脑** 处理简单任务，实现高效项目交付。
 
-- **State Machine** — Turn-based handoff between AI agents with full context
-- **Conversation Rotation** — Like log rotation for AI conversations; keeps context small and focused
-- **Multi-Layer Memory** — Hot/Warm/Cold memory architecture so each agent starts with just 1-2KB instead of 100K+ tokens
-- **Template System** — Define collaboration rules once, sync to all projects
-- **Traceability** — Every decision, every handoff, every AI output is recorded
+### 架构
 
-### Why?
+```
+┌─────────────────────────────────────────────────┐
+│                    plow-whip                     │
+├──────────────┬──────────────┬───────────────────┤
+│   whip.py    │   brain.py   │    dispatch.py    │
+│  (上帝之鞭)  │ (DeepSeek大脑)│   (投递通道)      │
+├──────────────┴──────────────┴───────────────────┤
+│               4 Agent 阵容                       │
+│  🔵 qoder (PM)  │  🔷 qoder_cli (审查)          │
+│  🟢 codex (学习) │  🟩 codex_cli (开发)          │
+├─────────────────────────────────────────────────┤
+│            memory-rotate 自动轮转                │
+│    Hot → Warm → Cold 多层记忆                   │
+└─────────────────────────────────────────────────┘
+```
 
-When you use 3-4 AI tools on one project, context gets lost. ChatGPT tells Codex one thing, Qoder says another, and nobody remembers what was decided last Tuesday.
-
-Plow-Whip solves this with:
-1. **Project files as source of truth** — Chat logs are ephemeral; files persist
-2. **Single-direction responsibility** — Each AI has a clear role; no conflicting instructions
-3. **Automatic context compression** — 100K tokens → 2KB summary via conversation rotation
-
-### Quick Start
+### 快速开始
 
 ```bash
+# 安装
 pip install plow-whip
 
-# Initialize a new project
-plow-whip init --projects-dir ~/my-projects --project MyProject
+# 初始化项目
+plow-whip --project MyProject init
 
-# Daily usage
-plow-whip status --project MyProject
-plow-whip handoff --project MyProject --output "Done X" --next "Do Y"
-plow-whip rotate --project MyProject --agent qoder --topic "Feature A" --summary "Implemented A"
-plow-whip sync  # Push framework updates to all projects
+# 查看状态
+plow-whip --project MyProject status
+
+# 挥舞上帝之鞭 — 扫描摸鱼 Agent
+plow-whip whip
+
+# 实际投递 + 启用 DeepSeek 大脑
+plow-whip whip --crack --brain
+
+# 持续自动挥舞 + 自动轮转
+plow-whip whip --auto-crack --auto-rotate
+
+# 使用 DeepSeek 处理简单任务
+plow-whip brain "写一个 Python 函数判断回文"
+
+# 一次检查所有记忆文件健康状态
+plow-whip --project MyProject memory-rotate
 ```
 
-### Architecture
+### 核心命令
 
+| 命令 | 功能 |
+|------|------|
+| `init` | 初始化项目（collab/ 目录 + 模板） |
+| `status` | 查看项目状态 |
+| `handoff` | 交接给下一个 Agent（自动轮转会话） |
+| `whip` | 上帝之鞭 — 驱动摸鱼 Agent |
+| `brain` | DeepSeek 廉价大脑 — 简单任务直接完成 |
+| `memory-rotate` | 自动轮转所有记忆文件 |
+| `rotate` | 手动轮转会话 |
+| `permit` | 设置投递权限 |
+| `watch` | 监控项目状态变化 |
+| `bind-tab` | 绑定项目到 zellij tab |
+
+### 上帝之鞭 (whip)
+
+```bash
+plow-whip whip                    # 扫描报告：谁在摸鱼
+plow-whip whip --crack            # 抽鞭！实际投递任务
+plow-whip whip --auto-crack       # 持续自动挥舞
+plow-whip whip --daemon           # 持续监控模式
+plow-whip whip --auto-rotate      # 自动轮转超限会话
+plow-whip whip --brain            # 简单任务交给 DeepSeek
 ```
-plow-whip/                    ← This framework (one copy, globally)
-├── plow_whip/
-│   ├── agent_flow.py         ← State machine + rotation engine
-│   ├── templates/            ← Project templates
-│   └── adr/                  ← Framework-level ADRs
 
-MyProject/
-└── collab/                   ← Project instance (per project)
-    ├── AGENT_STATE.json      ← Current turn
-    ├── AGENT_COMMS.md        ← Message board
-    ├── CONVENTIONS.md        ← Rules (from template)
-    ├── conversations/        ← Per-agent session files
-    └── memory/               ← Multi-layer project memory
+### DeepSeek 大脑 (brain)
+
+```bash
+plow-whip brain "写一个排序算法"   # 简单 → DeepSeek 1.7s 完成
+plow-whip brain "设计微服务架构"   # 复杂 → 建议上报主 Agent
 ```
 
-### Core Concepts
+复杂度自动分类：关键词匹配 + 长度权重 + 代码块检测
 
-| Concept | Description |
-|---------|-------------|
-| **State Machine** | Agents take turns. Handoff carries full context. |
-| **Conversation Rotation** | Like logrotate — archive old context, start fresh. |
-| **Multi-Layer Memory** | Hot (status+next) → Warm (roadmap+decisions) → Cold (archive) |
-| **Sync** | Update framework → propagate to all projects. |
+### 投递通道
 
-### License
+| 通道 | 说明 |
+|------|------|
+| `zellij` | 注入共享终端 |
+| `qoder_cli` | 唤醒 Qoder CLI |
+| `codex_cli` | 唤醒 Codex CLI |
+| `brain` | DeepSeek 处理简单任务 |
+| `file` | 写入任务收件箱 |
+| `notify` | macOS 通知 |
+
+### 4 Agent 阵容
+
+| Agent | 角色 | 可被 whip 驱动 |
+|-------|------|---------------|
+| 🔵 qoder | PM + 架构师 | ❌ 主对话窗口 |
+| 🔷 qoder_cli | 审查 + 验收 | ✅ |
+| 🟢 codex | 闲置/学习 | ❌ |
+| 🟩 codex_cli | Code Owner | ✅ |
+
+### 自动轮转
+
+- **Agent 会话**: 100行/8KB → 归档 + 重建模板
+- **Collab 文件**: 80行/6KB → 保留最新30行
+- **触发点**: handoff、whip daemon、memory-rotate
+
+### 许可
 
 MIT
 
 ---
 
-<a id="中文"></a>
-## 🇨🇳 中文
+<a id="english"></a>
+## English
 
-### 耕田之鞭是什么？
+### Introduction
 
-耕田之鞭是一个轻量级框架，用于在一个项目上协调多个 AI 编程助手（Codex、Cursor、Qoder、ChatGPT 等）。它提供：
+plow-whip is a multi-agent collaboration framework that manages a **4-agent lineup**, drives idle agents with the **whip**, and handles simple tasks with **DeepSeek brain**.
 
-- **状态机** — AI 之间的轮次交接，携带完整上下文
-- **会话轮转** — 类似 log rotation，保持上下文精简聚焦
-- **多层记忆** — Hot/Warm/Cold 三层架构，每个 AI 启动只需读 1-2KB 而非 100K+ tokens
-- **模板系统** — 协作规则定义一次，同步到所有项目
-- **全链路溯源** — 每个决策、每次交接、每条 AI 输出都有记录
+### Architecture
 
-### 为什么需要它？
+```
+┌─────────────────────────────────────────────────┐
+│                    plow-whip                     │
+├──────────────┬──────────────┬───────────────────┤
+│   whip.py    │   brain.py   │    dispatch.py    │
+│  (The Whip)  │ (DeepSeek)   │    (Dispatch)     │
+├──────────────┴──────────────┴───────────────────┤
+│               4 Agent Lineup                     │
+│  🔵 qoder (PM)   │  🔷 qoder_cli (Review)       │
+│  🟢 codex (Idle)  │  🟩 codex_cli (Dev)         │
+├─────────────────────────────────────────────────┤
+│            memory-rotate                         │
+│    Hot → Warm → Cold Memory Layers              │
+└─────────────────────────────────────────────────┘
+```
 
-当你在一个项目上同时用 3-4 个 AI 工具时，上下文会丢失。ChatGPT 告诉 Codex 一件事，Qoder 说了另一件事，没人记得上周二决定了什么。
-
-耕田之鞭的解决方案：
-1. **项目文件是唯一真相** — 聊天记录是临时的，文件是持久的
-2. **单向职责** — 每个 AI 角色明确，不存在矛盾指令
-3. **自动上下文压缩** — 100K tokens → 2KB 摘要，通过会话轮转实现
-
-### 快速开始
+### Quick Start
 
 ```bash
+# Install
 pip install plow-whip
 
-# 初始化新项目
-plow-whip init --projects-dir ~/my-projects --project MyProject
+# Initialize project
+plow-whip --project MyProject init
 
-# 日常使用
-plow-whip status --project MyProject          # 查看状态
-plow-whip handoff --project MyProject ...     # 交接轮次
-plow-whip rotate --project MyProject ...      # 会话轮转
-plow-whip sync                                # 同步框架更新
+# Check status
+plow-whip --project MyProject status
+
+# Crack the whip
+plow-whip whip --crack --brain
+
+# Daemon mode with auto-rotate
+plow-whip whip --auto-crack --auto-rotate
+
+# Use DeepSeek for simple tasks
+plow-whip brain "write a palindrome checker"
 ```
 
-### 架构
+### Core Commands
 
+| Command | Description |
+|---------|-------------|
+| `init` | Initialize project |
+| `status` | View project status |
+| `handoff` | Handoff to next agent (auto-rotates session) |
+| `whip` | The Whip — drive idle agents |
+| `brain` | DeepSeek brain for simple tasks |
+| `memory-rotate` | Auto-rotate all memory files |
+| `rotate` | Manual session rotation |
+| `permit` | Set dispatch permissions |
+
+### The Whip
+
+```bash
+plow-whip whip                    # Scan: who is slacking?
+plow-whip whip --crack            # Crack! Dispatch tasks
+plow-whip whip --auto-crack       # Continuous auto-dispatch
+plow-whip whip --daemon           # Daemon monitoring mode
+plow-whip whip --auto-rotate      # Auto-rotate oversized sessions
+plow-whip whip --brain            # Simple tasks → DeepSeek
 ```
-plow-whip/                    ← 框架（全局一份）
-├── plow_whip/
-│   ├── agent_flow.py         ← 状态机 + 轮转引擎
-│   ├── templates/            ← 项目模板
-│   └── adr/                  ← 框架级 ADR
 
-MyProject/
-└── collab/                   ← 项目实例（每个项目一份）
-    ├── AGENT_STATE.json      ← 当前轮次
-    ├── AGENT_COMMS.md        ← 留言板
-    ├── CONVENTIONS.md        ← 协作规则（从模板生成）
-    ├── conversations/        ← 每个 AI 的会话文件
-    └── memory/               ← 多层项目记忆
+### DeepSeek Brain
+
+```bash
+plow-whip brain "write a sort function"    # Simple → DeepSeek 1.7s
+plow-whip brain "design microservices"     # Complex → escalate
 ```
 
-### 核心概念
+Auto-classification: keyword matching + length weight + code block detection
 
-| 概念 | 说明 |
-|------|------|
-| **状态机** | AI 轮流工作，交接时携带完整上下文 |
-| **会话轮转** | 类似 logrotate — 归档旧上下文，重新开始 |
-| **多层记忆** | Hot（状态+待办）→ Warm（路线图+决策）→ Cold（归档）|
-| **同步** | 更新框架 → 传播到所有项目 |
+### Dispatch Channels
 
-### 许可
+| Channel | Description |
+|---------|-------------|
+| `zellij` | Shared terminal injection |
+| `qoder_cli` | Wake Qoder CLI |
+| `codex_cli` | Wake Codex CLI |
+| `brain` | DeepSeek processing |
+| `file` | Task inbox write |
+| `notify` | macOS notification |
+
+### 4-Agent Lineup
+
+| Agent | Role | Whip-drivable |
+|-------|------|---------------|
+| 🔵 qoder | PM + Architect | ❌ Main dialog |
+| 🔷 qoder_cli | Review + Accept | ✅ |
+| 🟢 codex | Idle/Learning | ❌ |
+| 🟩 codex_cli | Code Owner | ✅ |
+
+### Auto-Rotation
+
+- **Agent sessions**: 100 lines/8KB → archive + rebuild
+- **Collab files**: 80 lines/6KB → keep latest 30 lines
+- **Triggers**: handoff, whip daemon, memory-rotate
+
+### License
 
 MIT
