@@ -35,6 +35,9 @@ ROTATE_MAX_KB = 8
 
 DEFAULT_AGENTS = ["qoder", "codex", "cursor"]
 
+AGENT_LABEL = {"qoder": "Qoder (PM + Architect)", "codex": "Codex (Code Owner)", "cursor": "Cursor (Bug Reporter)"}
+AGENT_EMOJI = {"qoder": "🔵", "codex": "🟢", "cursor": "🟡"}
+
 
 def load_config():
     """Load config from ~/.plow-whip/config.json, create default if missing."""
@@ -362,6 +365,24 @@ def cmd_archive(project):
     print()
 
 
+
+def cmd_bind_tab(project: str, tab_index: int, tab_name: str = None):
+    """Bind a project to a specific zellij tab for targeted whip dispatch."""
+    sf = state_file(project)
+    if not os.path.exists(sf):
+        print(f"Error: project '{project}' not found.", file=sys.stderr)
+        sys.exit(1)
+    with open(sf, encoding="utf-8") as f:
+        state = json.load(f)
+    state["zellij_tab"] = tab_index
+    if tab_name:
+        state.setdefault("task_context", {})["tab_name"] = tab_name
+    save_state(project, state)
+    name_info = f" ({tab_name})" if tab_name else ""
+    print(f"\n📌 Project '{project}' bound to zellij tab {tab_index}{name_info}")
+    print(f"   Whip will now target this tab when dispatching to {project}\n")
+
+
 def cmd_watch(project, args):
     sf = state_file(project)
     interval = max(args.interval, 0.2)
@@ -580,6 +601,22 @@ def main():
     # sync
     sub.add_parser("sync", help="Sync framework templates to all projects")
 
+    # bind-tab
+    btp = sub.add_parser("bind-tab", help="Bind project to zellij tab")
+    btp.add_argument("--tab", type=int, required=True, help="Tab index (1-based)")
+    btp.add_argument("--name", help="Tab name (for display)")
+
+    # whip — God's whip / 上帝之鞭
+    whip_parser = sub.add_parser("whip", help="God's whip — actively drive agents to work")
+    whip_parser.add_argument("--agent", help="Target specific agent to whip")
+    whip_parser.add_argument("--stale-minutes", type=int, help="Stale threshold in minutes (default 60)")
+    whip_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    whip_parser.add_argument("--crack", action="store_true", help="CRACK! Actually dispatch tasks to agents")
+    whip_parser.add_argument("--auto-crack", action="store_true", help="Auto-crack mode: continuously scan and dispatch")
+    whip_parser.add_argument("--channel", choices=["zellij", "file", "notify"], help="Force specific dispatch channel")
+    whip_parser.add_argument("--daemon", action="store_true", help="Continuous monitoring mode")
+    whip_parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval in seconds (default 300)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -596,6 +633,10 @@ def main():
     if args.command == "sync":
         cmd_sync()
         return
+    if args.command == "whip":
+        from .whip import cmd_whip
+        cmd_whip(args)
+        return
 
     # Other commands need --project
     if not args.project:
@@ -604,6 +645,10 @@ def main():
         sys.exit(1)
 
     project = args.project
+
+    if args.command == "bind-tab":
+        cmd_bind_tab(project, args.tab, args.name)
+        return
 
     if args.command == "status":
         cmd_status(project)

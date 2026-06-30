@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""
+dispatch.py — 鞭子本体：将任务投递给指定 AI agent
+
+三种投递方式（按优先级）：
+  1. zellij  — 直接往共享终端注入命令（实时，agent 立即看到）
+  2. file    — 写入任务收件箱文件（agent 启动时读取）
+  3. notify  — macOS 通知（最后手段，提醒人来转达）
+
+用法:
+    from plow_whip.dispatch import dispatch
+    dispatch("codex", project="MyProject", prompt="实现登录功能")
+"""
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+
+from . import agent_flow as af
+
+
+# ── 配置 ─────────────────────────────────────────────────────────────────────
+
+ZELLIJ_SESSION = "shared"
+INBOX_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip", "inbox")
+
+
+def _ensure_inbox():
+    os.makedirs(INBOX_DIR, exist_ok=True)
+
+
+# ── 检测可用通道 ─────────────────────────────────────────────────────────────
+
+def _zellij_available() -> bool:
+    """检查 zellij 是否可用且 shared 会话存在。"""
+    try:
+        result = subprocess.run(
+            ["zellij", "list-sessions"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return ZELLIJ_SESSION in result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _agent_cli_available(agent: str) -> bool:
+    """检查 agent 的 CLI 是否可用。"""
+    cli_map = {
+        "codex": "codex",
+        "cursor": "cursor",
+    }
+    cmd = cli_map.get(agent)
+    if not cmd:
+        return False
+    try:
+        subprocess.run(
+            ["which", cmd],
+            capture_output=True, timeout=3,
+        )
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def available_channels(agent: str) -> list:
+    """返回指定 agent 当前可用的投递通道列表（按优先级）。"""
+    channels = []
+    if agent == "qoder" and _zellij_available():
+        channels.append("zellij")
+    if _agent_cli_available(agent):
+        channels.append("cli")
+    channels.append("file")
+    channels.append("notify")
+    return channels
+
+
+# ── 投递方法 ──────────────────────────────────────────────────────────────────
+
+def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
+    """
+    通过 zellij 注入命令到共享终端。
+    如果指定 target_tab，先切换到对应 tab 再注入。
+    """
+    # 构造注入的命令
+    header = f"echo '=== 上帝之鞭 === 项目: {project} ==='"
+    status_cmd = f"python3 -m plow_whip.agent_flow --project {project} status"
+    prompt_echo = f"echo '{prompt}'"
+    full_command = f"{header} && {status_cmd} && {prompt_echo}"
+
+    try:
+        # 如果指定了 tab，先切换
+        if target_tab is not None:
+            subprocess.run(
+                ["zellij", "action", "go-to-tab", str(target_tab)],
+                capture_output=True, text=True, timeout=3,
+            )
+
+        result = subprocess.run(
+            ["zellij", "action", "write-chars", full_command + "\n"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            tab_info = f" (tab {target_tab})" if target_tab else ""
+            return {"success": True, "channel": "zellij", "detail": f"命令已注入到 shared 会话{tab_info}"}
+        return {"success": False, "channel": "zellij", "detail": f"zellij 返回 {result.returncode}: {result.stderr}"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "channel": "zellij", "detail": "zellij 超时"}
+    except FileNotFoundError:
+        return {"success": False, "channel": "zellij", "detail": "zellij 未安装"}
+
+
+def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
+    """
+    写入任务收件箱文件。
+    agent 启动时会读取 ~/.plow-whip/inbox/<agent>.json
+    """
+    _ensure_inbox()
+    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
+
+    # 读取现有任务（如有）
+    tasks = []
+    if os.path.exists(inbox_file):
+        try:
+            with open(inbox_file, encoding="utf-8") as f:
+                tasks = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            tasks = []
+
+    # 追加新任务
+    tasks.append({
+        "project": project,
+        "prompt": prompt,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "pending",
+    })
+
+    with open(inbox_file, "w", encoding="utf-8") as f:
+        json.dump(tasks, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    return {"success": True, "channel": "file", "detail": f"任务已写入 {inbox_file}"}
+
+
+def _dispatch_notify(agent: str, prompt: str, project: str) -> dict:
+    """发送 macOS 通知。"""
+    message = f"[{project}] 轮到 {agent} — 请查看任务"
+    af.notify(message, ring=True)
+    return {"success": True, "channel": "notify", "detail": "macOS 通知已发送"}
+
+
+# ── 主入口 ────────────────────────────────────────────────────────────────────
+
+def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, **kwargs) -> dict:
+    """
+    将任务投递给指定 agent。
+
+    参数:
+      agent: 目标 agent 名称（qoder/codex/cursor）
+      project: 项目名称
+      prompt: 可执行的鞭策指令文本
+      force_channel: 强制使用指定通道（zellij/file/notify）
+
+    返回:
+      {"success": bool, "channel": str, "detail": str}
+    """
+    if force_channel:
+        channels = [force_channel]
+    else:
+        channels = available_channels(agent)
+
+    for ch in channels:
+        if ch == "zellij":
+            target_tab = kwargs.get("target_tab")
+            result = _dispatch_zellij(prompt, project, target_tab)
+        elif ch == "file":
+            result = _dispatch_file(agent, prompt, project)
+        elif ch == "notify":
+            result = _dispatch_notify(agent, prompt, project)
+        else:
+            continue
+
+        if result["success"]:
+            return result
+
+    return {"success": False, "channel": "none", "detail": "所有通道均失败"}
+
+
+def read_inbox(agent: str) -> list:
+    """读取指定 agent 的任务收件箱。"""
+    _ensure_inbox()
+    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
+    if not os.path.exists(inbox_file):
+        return []
+    try:
+        with open(inbox_file, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def clear_inbox(agent: str):
+    """清空指定 agent 的任务收件箱。"""
+    _ensure_inbox()
+    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
+    if os.path.exists(inbox_file):
+        os.remove(inbox_file)

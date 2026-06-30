@@ -93,3 +93,26 @@ plow-whip --project {PROJECT_NAME} rotate --agent qoder --topic "topic" --summar
 ---
 
 *Last updated: {DATE}*
+
+---
+
+## 8. Session Startup: Check Inbox
+
+When starting a new session, **always check your inbox first**:
+
+```bash
+# Check for pending tasks
+cat ~/.plow-whip/inbox/<your-agent-name>.json
+
+# If tasks exist, read minimal context:
+# 1. inbox task (what to do)
+# 2. memory/CURRENT_STATUS.md (project status)
+# 3. conversations/<your-agent>/current.md (your last session)
+```
+
+**Why**: The whip daemon writes tasks to your inbox when it detects stale projects. You don't need to poll — just check inbox at session start.
+
+**After completing a task**: Clear your inbox
+```bash
+plow-whip whip --crack --agent <your-agent>  # or manually clear ~/.plow-whip/inbox/<agent>.json
+```
