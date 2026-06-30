@@ -75,22 +75,22 @@ class TestStaleDetection(WhipTestBase):
         self.assertTrue(_is_stale(state, 60))
 
     def test_is_stale_recently_updated(self):
-        now = datetime.now()
+        now = datetime.now().astimezone()
         state = {"status": "in_progress", "updated_at": now.isoformat()}
         self.assertFalse(_is_stale(state, 60))
 
     def test_is_stale_old_update(self):
-        old = datetime.now() - timedelta(hours=2)
+        old = datetime.now().astimezone() - timedelta(hours=2)
         state = {"status": "in_progress", "updated_at": old.isoformat()}
         self.assertTrue(_is_stale(state, 60))
 
     def test_is_stale_done_not_stale(self):
-        old = datetime.now() - timedelta(days=7)
+        old = datetime.now().astimezone() - timedelta(days=7)
         state = {"status": "done", "updated_at": old.isoformat()}
         self.assertFalse(_is_stale(state, 60))
 
     def test_is_stale_blocked_not_stale(self):
-        old = datetime.now() - timedelta(days=7)
+        old = datetime.now().astimezone() - timedelta(days=7)
         state = {"status": "blocked", "updated_at": old.isoformat()}
         self.assertFalse(_is_stale(state, 60))
 
@@ -101,25 +101,25 @@ class TestStalenessInfo(WhipTestBase):
         self.assertEqual(_staleness_info(state), "从未更新")
 
     def test_seconds_ago(self):
-        now = datetime.now()
+        now = datetime.now().astimezone()
         state = {"updated_at": now.isoformat()}
         info = _staleness_info(state)
         self.assertIn("秒前", info)
 
     def test_minutes_ago(self):
-        old = datetime.now() - timedelta(minutes=15)
+        old = datetime.now().astimezone() - timedelta(minutes=15)
         state = {"updated_at": old.isoformat()}
         info = _staleness_info(state)
         self.assertIn("分钟前", info)
 
     def test_hours_ago(self):
-        old = datetime.now() - timedelta(hours=3)
+        old = datetime.now().astimezone() - timedelta(hours=3)
         state = {"updated_at": old.isoformat()}
         info = _staleness_info(state)
         self.assertIn("小时前", info)
 
     def test_days_ago(self):
-        old = datetime.now() - timedelta(days=5)
+        old = datetime.now().astimezone() - timedelta(days=5)
         state = {"updated_at": old.isoformat()}
         info = _staleness_info(state)
         self.assertIn("天前", info)

@@ -38,11 +38,15 @@ STATUS_LABEL = {
 
 
 def _parse_updated_at(ts: str):
-    """安全解析 ISO 时间戳。"""
+    """安全解析 ISO 时间戳，返回 timezone-aware datetime。"""
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(ts)
+        # 如果是 naive datetime，加上本地时区
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return dt
     except (ValueError, TypeError):
         return None
 
