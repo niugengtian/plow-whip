@@ -1,0 +1,629 @@
+#!/usr/bin/env python3
+"""
+plow-whip — Multi-Agent Collaboration State Machine Engine
+多Agent协作工具 · 耕田之鞭
+
+Usage:
+    plow-whip --project <name> status              # View project status
+    plow-whip --project <name> handoff --output …   # Handoff to next agent
+    plow-whip --project <name> init                 # Initialize new project
+    plow-whip --project <name> session --agent …    # View agent session
+    plow-whip --project <name> rotate --agent …     # Rotate agent session
+    plow-whip --project <name> sessions-overview    # All sessions overview
+    plow-whip sync                                  # Sync framework updates
+    plow-whip list                                  # List all projects
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+from datetime import datetime
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+ROTATE_MAX_LINES = 100
+ROTATE_MAX_KB = 8
+
+DEFAULT_AGENTS = ["qoder", "codex", "cursor"]
+
+
+def load_config():
+    """Load config from ~/.plow-whip/config.json, create default if missing."""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {"projects_dir": "", "agents": DEFAULT_AGENTS}
+
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def get_projects_dir():
+    cfg = load_config()
+    d = cfg.get("projects_dir", "")
+    if not d:
+        print("Error: projects_dir not configured.", file=sys.stderr)
+        print(f"Run: plow-whip configure --projects-dir /path/to/projects", file=sys.stderr)
+        sys.exit(1)
+    return d
+
+
+def get_agents():
+    cfg = load_config()
+    return cfg.get("agents", DEFAULT_AGENTS)
+
+
+# ── Path Resolution ────────────────────────────────────────────────────────────
+
+def project_collab_dir(project):
+    return os.path.join(get_projects_dir(), project, "collab")
+
+
+def project_memory_dir(project):
+    return os.path.join(project_collab_dir(project), "memory")
+
+
+def conversations_dir(project):
+    return os.path.join(project_collab_dir(project), "conversations")
+
+
+def state_file(project):
+    return os.path.join(project_collab_dir(project), "AGENT_STATE.json")
+
+
+def comms_file(project):
+    return os.path.join(project_collab_dir(project), "AGENT_COMMS.md")
+
+
+# ── Templates ──────────────────────────────────────────────────────────────────
+
+def template_dir():
+    return os.path.join(PACKAGE_DIR, "templates")
+
+
+def render_template(template_name, project):
+    """Render a template file with {PROJECT_NAME} substitution."""
+    tpl_path = os.path.join(template_dir(), template_name)
+    if not os.path.exists(tpl_path):
+        return None
+    with open(tpl_path, encoding="utf-8") as f:
+        content = f.read()
+    return content.replace("{PROJECT_NAME}", project)
+
+
+def write_rendered(target_path, template_name, project):
+    """Render template and write to target path."""
+    content = render_template(template_name, project)
+    if content is not None:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+    return False
+
+
+# ── Notifications ──────────────────────────────────────────────────────────────
+
+def apple_string(text):
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
+def notify(message, ring=False):
+    if ring or sys.platform != "darwin":
+        print("\a", end="")
+    if sys.platform != "darwin":
+        return
+    script = f"display notification {apple_string(message)} with title {apple_string('🪢 plow-whip')}"
+    subprocess.run(
+        ["osascript", "-e", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+# ── State Read/Write ───────────────────────────────────────────────────────────
+
+def default_state(project):
+    return {
+        "current_agent": "qoder",
+        "phase": "initialization",
+        "status": "in_progress",
+        "task_context": {"day": 0, "topic": "", "project_dir": ""},
+        "last_output": "",
+        "files_changed": [],
+        "verify_commands": [],
+        "next_action": f"Qoder starts requirements analysis for {project}",
+        "updated_at": "",
+    }
+
+
+def load_state(project):
+    sf = state_file(project)
+    if not os.path.exists(sf):
+        print(f"Error: project '{project}' not found. Run: plow-whip --project {project} init", file=sys.stderr)
+        sys.exit(1)
+    with open(sf, encoding="utf-8") as f:
+        state = json.load(f)
+    base = default_state(project)
+    for key in base:
+        if key not in state:
+            state[key] = base[key]
+    return state
+
+
+def save_state(project, state):
+    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    sf = state_file(project)
+    with open(sf, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+# ── Commands ───────────────────────────────────────────────────────────────────
+
+def cmd_configure(args):
+    """Configure plow-whip settings."""
+    cfg = load_config()
+    if args.projects_dir:
+        cfg["projects_dir"] = os.path.abspath(args.projects_dir)
+    if args.agents:
+        cfg["agents"] = args.agents
+    save_config(cfg)
+    print(f"\n🪢 plow-whip configured:")
+    print(f"   projects_dir: {cfg.get('projects_dir', '(not set)')}")
+    print(f"   agents: {cfg.get('agents', DEFAULT_AGENTS)}")
+    print(f"   config: {CONFIG_FILE}\n")
+
+
+def cmd_status(project):
+    state = load_state(project)
+    agent = state["current_agent"]
+    status_map = {"in_progress": "In Progress", "done": "Done", "blocked": "Blocked"}
+    status_text = status_map.get(state["status"], state["status"])
+    ctx = state.get("task_context", {})
+
+    print(f"\n📂 Project: {project}")
+    print(f"🤖 Current turn: {agent} ({state['phase']} — {status_text})")
+    if ctx.get("day"):
+        print(f"📅 Task: Day {ctx['day']} — {ctx.get('topic', '')}")
+    if ctx.get("project_dir"):
+        print(f"📁 Code: {ctx['project_dir']}")
+    print(f"📌 Last output: {state['last_output'] or '(none)'}")
+    files = state.get("files_changed", [])
+    if files:
+        print(f"📝 Changed files: {', '.join(files)}")
+    cmds = state.get("verify_commands", [])
+    if cmds:
+        print("🧪 Verify commands:")
+        for c in cmds:
+            print(f"   $ {c}")
+    print(f"➡️  Next: {state['next_action'] or '(none)'}")
+    print(f"🕐 Updated: {state['updated_at'] or '(never)'}")
+    print()
+
+
+def cmd_handoff(project, args):
+    state = load_state(project)
+    current = state["current_agent"]
+    agents = get_agents()
+    idx = agents.index(current) if current in agents else 0
+    next_agent = agents[(idx + 1) % len(agents)]
+
+    state["current_agent"] = next_agent
+    if args.phase:
+        state["phase"] = args.phase
+    state["status"] = args.status
+    state["last_output"] = args.output
+    state["next_action"] = args.next or ""
+    if args.day is not None:
+        state.setdefault("task_context", {})["day"] = args.day
+    if args.topic:
+        state.setdefault("task_context", {})["topic"] = args.topic
+    if args.project_dir:
+        state.setdefault("task_context", {})["project_dir"] = args.project_dir
+    if args.files:
+        state["files_changed"] = args.files
+    if args.verify:
+        state["verify_commands"] = args.verify
+
+    save_state(project, state)
+    print(f"\n✅ Handoff: {current} → {next_agent} (project: {project})")
+    print(f"📋 Phase: {state['phase']}")
+    print(f"📌 Output: {args.output}")
+    print(f"➡️  {next_agent} please: {state['next_action'] or '(check status)'}")
+    print()
+    notify(f"[{project}] {current} → {next_agent}", ring=True)
+
+
+def cmd_reset(project):
+    save_state(project, default_state(project))
+    print(f"\n🔄 Project '{project}' state reset.\n")
+
+
+def cmd_init(project, args=None):
+    """Initialize a new project with full collab/ structure."""
+    pcd = project_collab_dir(project)
+    sf = state_file(project)
+    if os.path.exists(sf):
+        print(f"Project '{project}' already exists: {sf}")
+        return
+
+    # Create collab/ directory structure
+    os.makedirs(pcd, exist_ok=True)
+    os.makedirs(os.path.join(pcd, "conversations"), exist_ok=True)
+    for agent in get_agents():
+        agent_dir = os.path.join(pcd, "conversations", agent)
+        os.makedirs(agent_dir, exist_ok=True)
+        _write_session_template(agent, project, os.path.join(agent_dir, "current.md"))
+
+    # Create memory/ directory
+    mem_dir = project_memory_dir(project)
+    os.makedirs(mem_dir, exist_ok=True)
+    os.makedirs(os.path.join(mem_dir, "adr"), exist_ok=True)
+    os.makedirs(os.path.join(mem_dir, "sessions"), exist_ok=True)
+    os.makedirs(os.path.join(mem_dir, "sprints", "active"), exist_ok=True)
+    os.makedirs(os.path.join(mem_dir, "sprints", "archive"), exist_ok=True)
+
+    # Render templates
+    memory_templates = [
+        ("PROJECT.md.tpl", "PROJECT.md"),
+        ("CURRENT_STATUS.md.tpl", "CURRENT_STATUS.md"),
+        ("NEXT_ACTION.md.tpl", "NEXT_ACTION.md"),
+        ("ROADMAP.md.tpl", "ROADMAP.md"),
+        ("DECISIONS.md.tpl", "DECISIONS.md"),
+    ]
+    for tpl_name, out_name in memory_templates:
+        write_rendered(os.path.join(mem_dir, out_name), f"memory/{tpl_name}", project)
+
+    # Render CONVENTIONS.md
+    write_rendered(os.path.join(pcd, "CONVENTIONS.md"), "CONVENTIONS.md.tpl", project)
+
+    # Create AGENT_COMMS.md
+    write_rendered(comms_file(project), "AGENT_COMMS.md.tpl", project)
+
+    # Create state file
+    save_state(project, default_state(project))
+
+    print(f"\n🆕 Project '{project}' initialized!")
+    print(f"   collab/: {pcd}")
+    print(f"   memory/: {mem_dir}")
+    print(f"   state:   {sf}")
+    print(f"   Run: plow-whip --project {project} handoff --output 'Start' --next 'First step'\n")
+
+
+def cmd_list():
+    projects_dir = get_projects_dir()
+    if not os.path.isdir(projects_dir):
+        print("No projects directory configured.")
+        return
+    projects = sorted(
+        d for d in os.listdir(projects_dir)
+        if os.path.isdir(os.path.join(projects_dir, d, "collab"))
+    )
+    if not projects:
+        print("No active projects.")
+        return
+
+    print(f"\n📋 Active projects ({len(projects)}):\n")
+    for p in projects:
+        sf = state_file(p)
+        if os.path.exists(sf):
+            state = load_state(p)
+            agent = state["current_agent"]
+            status_map = {"in_progress": "In Progress", "done": "Done", "blocked": "Blocked"}
+            status = status_map.get(state["status"], state["status"])
+            ctx = state.get("task_context", {})
+            topic = ctx.get("topic", "")
+            print(f"  🤖 {p:20s} {topic:20s} {agent} — {status}")
+        else:
+            print(f"  ⚪ {p:20s} (not initialized)")
+    print()
+
+
+def cmd_archive(project):
+    pcd = project_collab_dir(project)
+    if not os.path.isdir(pcd):
+        print(f"Project '{project}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    state = load_state(project)
+    if state["status"] != "done":
+        print(f"Project '{project}' status is '{state['status']}', only 'done' can be archived.", file=sys.stderr)
+        sys.exit(1)
+
+    projects_dir = get_projects_dir()
+    archive_dir = os.path.join(projects_dir, "by_rm", "plow-whip-archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_name = f"{project}_{timestamp}.tar.gz"
+    archive_path = os.path.join(archive_dir, archive_name)
+
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(pcd, arcname=f"{project}/collab")
+
+    shutil.move(pcd, os.path.join(archive_dir, f"{project}_{timestamp}"))
+    print(f"\n📦 Archived: {project}")
+    print(f"   Archive: {archive_path}")
+    print(f"   Last output: {state['last_output']}")
+    print()
+
+
+def cmd_watch(project, args):
+    sf = state_file(project)
+    interval = max(args.interval, 0.2)
+    last_mtime = os.path.getmtime(sf) if os.path.exists(sf) else 0
+    print(f"👀 Watching project '{project}'... interval {interval:g}s, Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(interval)
+            mtime = os.path.getmtime(sf) if os.path.exists(sf) else 0
+            if mtime == last_mtime:
+                continue
+            last_mtime = mtime
+            state = load_state(project)
+            agent = state["current_agent"]
+            status_map = {"in_progress": "In Progress", "done": "Done", "blocked": "Blocked"}
+            status = status_map.get(state["status"], state["status"])
+            summary = f"[{project}] {agent}: {state['phase']} — {status}"
+            notify(summary)
+            if not args.quiet:
+                print(f"\n🔔 State change: {summary}")
+                print(f"📌 Last output: {state['last_output'] or '(none)'}")
+                print(f"➡️  Next: {state['next_action'] or '(none)'}")
+    except KeyboardInterrupt:
+        print(f"\n👋 Stopped watching '{project}'")
+
+
+def cmd_session(project, agent):
+    curr = os.path.join(conversations_dir(project), agent, "current.md")
+    if not os.path.exists(curr):
+        print(f"❗ {agent}'s current.md not found.")
+        return
+    size = os.path.getsize(curr)
+    with open(curr, encoding="utf-8") as f:
+        lines = f.readlines()
+    line_count = len(lines)
+    needs_rotate = line_count > ROTATE_MAX_LINES or size > ROTATE_MAX_KB * 1024
+    status = "🔴 Needs rotation" if needs_rotate else "🟢 OK"
+    print(f"\n📝 {agent} current session: {curr}")
+    print(f"   Lines: {line_count} / {ROTATE_MAX_LINES}")
+    print(f"   Size: {size / 1024:.1f}KB / {ROTATE_MAX_KB}KB")
+    print(f"   Status: {status}")
+    print()
+
+
+def cmd_rotate(project, agent, args):
+    conv_dir = conversations_dir(project)
+    curr = os.path.join(conv_dir, agent, "current.md")
+    if not os.path.exists(curr):
+        print(f"❗ {agent}'s current.md not found, creating.")
+        os.makedirs(os.path.join(conv_dir, agent), exist_ok=True)
+        _write_session_template(agent, project, curr)
+        return
+
+    with open(curr, encoding="utf-8") as f:
+        content = f.read()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    topic = args.topic or "session"
+    topic_safe = topic.replace(" ", "_").replace("/", "-")[:40]
+    archive_name = f"{timestamp}_{topic_safe}.md"
+    archive_path = os.path.join(conv_dir, agent, archive_name)
+
+    with open(archive_path, "w", encoding="utf-8") as f:
+        f.write(f"# Archived Session: {topic}\n")
+        f.write(f"**AI:** {agent}\n")
+        f.write(f"**Archived:** {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"**Project:** {project}\n\n")
+        if args.summary:
+            f.write(f"## Summary\n{args.summary}\n\n")
+        f.write("## Original Content\n\n")
+        f.write(content)
+
+    _write_session_template(agent, project, curr)
+
+    size = os.path.getsize(archive_path)
+    print(f"\n🔄 Rotated: {agent} (project: {project})")
+    print(f"   Archived: {archive_path} ({size / 1024:.1f}KB)")
+    print(f"   New current.md created")
+    print()
+    notify(f"[session rotated] {agent}: {topic}")
+
+
+def _write_session_template(agent, project, path):
+    """Write a fresh current.md for an agent."""
+    role_map = {
+        "qoder": "Qoder (PM + Architect)",
+        "codex": "Codex (Code Owner)",
+        "cursor": "Cursor (Bug Reporter)",
+    }
+    role = role_map.get(agent, agent)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# {role.split(' ')[0]} Session — {project}\n\n")
+        f.write(f"**AI:** {role}\n")
+        f.write(f"**Started:** {datetime.now().strftime('%Y-%m-%d')}\n")
+        f.write(f"**Topic:** —\n\n")
+        f.write(f"## Previous\n- (none, new session)\n\n")
+        f.write(f"## Current Tasks\n- (check NEXT_ACTION.md)\n\n")
+        f.write(f"## Key Decisions\n- (decisions will be appended here)\n\n")
+        f.write(f"## Outputs\n- (outputs will be appended here)\n")
+
+
+def cmd_sessions_overview(project):
+    print(f"\n📊 Session overview (project: {project}):\n")
+    for agent in get_agents():
+        curr = os.path.join(conversations_dir(project), agent, "current.md")
+        if not os.path.exists(curr):
+            print(f"  ⚪ {agent:8s} — not initialized")
+            continue
+        size = os.path.getsize(curr)
+        with open(curr, encoding="utf-8") as f:
+            lines = len(f.readlines())
+        needs_rotate = lines > ROTATE_MAX_LINES or size > ROTATE_MAX_KB * 1024
+        icon = "🔴" if needs_rotate else "🟢"
+        print(f"  {icon} {agent:8s} — {lines} lines, {size / 1024:.1f}KB")
+    print()
+
+
+def cmd_sync():
+    """Sync framework templates to all projects."""
+    projects_dir = get_projects_dir()
+    if not os.path.isdir(projects_dir):
+        print("No projects directory configured.", file=sys.stderr)
+        sys.exit(1)
+
+    projects = sorted(
+        d for d in os.listdir(projects_dir)
+        if os.path.isdir(os.path.join(projects_dir, d, "collab"))
+        and d != "by_rm"
+    )
+    if not projects:
+        print("No projects with collab/ found.")
+        return
+
+    print(f"\n🔄 Syncing framework templates to {len(projects)} project(s):\n")
+    for p in projects:
+        updated = []
+        # Sync CONVENTIONS.md
+        conventions_path = os.path.join(projects_dir, p, "collab", "CONVENTIONS.md")
+        if write_rendered(conventions_path, "CONVENTIONS.md.tpl", p):
+            updated.append("CONVENTIONS.md")
+        # Sync memory templates
+        mem_dir = os.path.join(projects_dir, p, "collab", "memory")
+        if os.path.isdir(mem_dir):
+            for tpl_name, out_name in [
+                ("PROJECT.md.tpl", "PROJECT.md"),
+                ("CURRENT_STATUS.md.tpl", "CURRENT_STATUS.md"),
+            ]:
+                target = os.path.join(mem_dir, out_name)
+                if write_rendered(target, f"memory/{tpl_name}", p):
+                    updated.append(out_name)
+        status = "✅ " + ", ".join(updated) if updated else "⚪ no changes"
+        print(f"  {p:20s} {status}")
+    print()
+
+
+# ── Entry Point ────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="🪢 plow-whip — Multi-Agent Collaboration Framework / 耕田之鞭"
+    )
+    parser.add_argument("--project", "-p", help="Target project name")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # configure
+    cfg_parser = sub.add_parser("configure", help="Configure plow-whip")
+    cfg_parser.add_argument("--projects-dir", help="Root directory for projects")
+    cfg_parser.add_argument("--agents", nargs="+", help="Agent names")
+
+    # list
+    sub.add_parser("list", help="List all active projects")
+
+    # status
+    sub.add_parser("status", help="View project status")
+
+    # handoff
+    hp = sub.add_parser("handoff", help="Handoff to next agent")
+    hp.add_argument("--phase", help="Phase name")
+    hp.add_argument("--status", choices=["in_progress", "done", "blocked"], default="done")
+    hp.add_argument("--output", required=True, help="Output summary")
+    hp.add_argument("--next", help="Next step")
+    hp.add_argument("--day", type=int, help="Current day")
+    hp.add_argument("--topic", help="Current topic")
+    hp.add_argument("--project-dir", help="Code directory")
+    hp.add_argument("--files", nargs="+", help="Changed files")
+    hp.add_argument("--verify", nargs="+", help="Verify commands")
+
+    # reset
+    sub.add_parser("reset", help="Reset project state")
+
+    # init
+    sub.add_parser("init", help="Initialize new project")
+
+    # archive
+    sub.add_parser("archive", help="Archive completed project")
+
+    # watch
+    wp = sub.add_parser("watch", help="Watch project state changes")
+    wp.add_argument("--interval", type=float, default=3, help="Poll interval (default 3s)")
+    wp.add_argument("--quiet", action="store_true", help="Quiet mode")
+
+    # session
+    sp = sub.add_parser("session", help="View agent session status")
+    sp.add_argument("--agent", required=True, help="Agent name")
+
+    # rotate
+    rp = sub.add_parser("rotate", help="Rotate agent session")
+    rp.add_argument("--agent", required=True, help="Agent name")
+    rp.add_argument("--topic", help="Session topic")
+    rp.add_argument("--summary", help="Session summary")
+
+    # sessions-overview
+    sub.add_parser("sessions-overview", help="All sessions overview")
+
+    # sync
+    sub.add_parser("sync", help="Sync framework templates to all projects")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return
+
+    # configure and list and sync don't need --project
+    if args.command == "configure":
+        cmd_configure(args)
+        return
+    if args.command == "list":
+        cmd_list()
+        return
+    if args.command == "sync":
+        cmd_sync()
+        return
+
+    # Other commands need --project
+    if not args.project:
+        print("Error: --project required", file=sys.stderr)
+        print("Example: plow-whip --project MyProject status", file=sys.stderr)
+        sys.exit(1)
+
+    project = args.project
+
+    if args.command == "status":
+        cmd_status(project)
+    elif args.command == "handoff":
+        cmd_handoff(project, args)
+    elif args.command == "reset":
+        cmd_reset(project)
+    elif args.command == "init":
+        cmd_init(project, args)
+    elif args.command == "archive":
+        cmd_archive(project)
+    elif args.command == "watch":
+        cmd_watch(project, args)
+    elif args.command == "session":
+        cmd_session(project, args.agent)
+    elif args.command == "rotate":
+        cmd_rotate(project, args.agent, args)
+    elif args.command == "sessions-overview":
+        cmd_sessions_overview(project)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
