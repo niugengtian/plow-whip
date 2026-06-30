@@ -50,6 +50,7 @@ def _agent_cli_available(agent: str) -> bool:
     cli_map = {
         "codex": "codex",
         "cursor": "cursor",
+        "qoder": "qoderclicn",
     }
     cmd = cli_map.get(agent)
     if not cmd:
@@ -67,6 +68,9 @@ def _agent_cli_available(agent: str) -> bool:
 def available_channels(agent: str) -> list:
     """返回指定 agent 当前可用的投递通道列表（按优先级）。"""
     channels = []
+    # qoder_cli 是最优通道（真正自动唤醒）
+    if agent == "qoder" and _agent_cli_available("qoder"):
+        channels.append("qoder_cli")
     if agent == "qoder" and _zellij_available():
         channels.append("zellij")
     if _agent_cli_available(agent):
@@ -109,6 +113,61 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
         return {"success": False, "channel": "zellij", "detail": "zellij 超时"}
     except FileNotFoundError:
         return {"success": False, "channel": "zellij", "detail": "zellij 未安装"}
+
+
+def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
+    """
+    通过 qoderclicn Print 模式直接唤醒 Qoder CLI 执行任务。
+    这是真正的自动唤醒——不需要人点，脚本直接调。
+    """
+    # 获取项目路径
+    projects_dir = af.get_projects_dir()
+    project_path = os.path.join(projects_dir, project)
+    
+    if not os.path.isdir(project_path):
+        return {"success": False, "channel": "qoder_cli", "detail": f"项目路径不存在: {project_path}"}
+    
+    # 构造 prompt 指令
+    full_prompt = f"""plow-whip wakeup: {project} 项目被上帝之鞭唤醒。
+
+请执行以下任务:
+{prompt}
+
+完成后:
+1. 更新 AGENT_STATE.json (handoff)
+2. 写进度到 AGENT_COMMS.md
+3. 清空 ~/.plow-whip/inbox/qoder.json 中对应任务"""
+    
+    cmd = [
+        "qoderclicn",
+        "-p", full_prompt,
+        "-w", project_path,
+        "--yolo",
+        "--max-turns", str(max_turns),
+    ]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=300,  # 5 分钟超时
+        )
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "channel": "qoder_cli",
+                "detail": f"Qoder CLI 已在 {project_path} 执行任务",
+                "output": result.stdout[:500] if result.stdout else "",
+            }
+        return {
+            "success": False,
+            "channel": "qoder_cli",
+            "detail": f"qoderclicn 返回 {result.returncode}: {result.stderr[:200]}",
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 超时 (5分钟)"}
+    except FileNotFoundError:
+        return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 未安装"}
 
 
 def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
@@ -171,7 +230,10 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
         channels = available_channels(agent)
 
     for ch in channels:
-        if ch == "zellij":
+        if ch == "qoder_cli":
+            max_turns = kwargs.get("max_turns", 20)
+            result = _dispatch_qoder_cli(prompt, project, max_turns)
+        elif ch == "zellij":
             target_tab = kwargs.get("target_tab")
             result = _dispatch_zellij(prompt, project, target_tab)
         elif ch == "file":
