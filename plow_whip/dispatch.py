@@ -191,7 +191,7 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
     如果指定 target_tab，先切换到对应 tab 再注入。
     """
     # 构造注入的命令
-    header = f"echo '=== 上帝之鞭 === 项目: {project} ==='"
+    header = f"echo '=== 耕田之鞭 === 项目: {project} ==='"
     status_cmd = f"python3 -m plow_whip.agent_flow --project {project} status"
     prompt_echo = f"echo '{prompt}'"
     full_command = f"{header} && {status_cmd} && {prompt_echo}"
@@ -231,7 +231,7 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20, timeout:
         return {"success": False, "channel": "qoder_cli", "detail": f"项目路径不存在: {project_path}"}
     
     # 构造 prompt 指令
-    full_prompt = f"""plow-whip wakeup: {project} 项目被上帝之鞭唤醒。
+    full_prompt = f"""plow-whip wakeup: {project} 项目被耕田之鞭唤醒。
 
 请执行以下任务:
 {prompt}
@@ -286,7 +286,7 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout:
         return {"success": False, "channel": "codex_cli", "detail": f"项目路径不存在: {project_path}"}
     
     # 构造 prompt 指令
-    full_prompt = f"""plow-whip wakeup: {project} 项目被上帝之鞭唤醒。
+    full_prompt = f"""plow-whip wakeup: {project} 项目被耕田之鞭唤醒。
 
 请执行以下任务:
 {prompt}

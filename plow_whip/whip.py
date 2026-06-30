@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-whip.py — 上帝之鞭：主动驱动 AI agent 干活
+whip.py — 耕田之鞭：主动驱动 AI agent 干活
 
 核心功能：
   1. 扫描所有项目状态，找出当前轮到谁
@@ -296,9 +296,9 @@ def _crack(results: list, force_channel: str = None, force: bool = False, use_br
 def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_rotate=False, use_brain=False):
     """
     自动挥舞模式：持续扫描，发现摸鱼就自动抽鞭。
-    这是真正的"上帝之鞭" — 不需要人介入，自动驱动 agent 干活。
+    这是真正的"耕田之鞭" — 不需要人介入，自动驱动 agent 干活。
     """
-    print("  上帝之鞭 — 自动挥舞模式")
+    print("  耕田之鞭 — 自动挥舞模式")
     print(f"   摸鱼阈值: {stale_minutes} 分钟")
     print(f"   轮询间隔: {interval} 秒")
     if target_agent:
@@ -334,12 +334,12 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_
 
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("\n  上帝之鞭已收起")
+        print("\n  耕田之鞭已收起")
 
 
 def _daemon_loop(stale_minutes, target_agent, as_json, interval, auto_rotate=False):
     """持续监控模式。"""
-    print("  上帝之鞭 — 持续监控模式")
+    print("  耕田之鞭 — 持续监控模式")
     print(f"   摸鱼阈值: {stale_minutes} 分钟")
     print(f"   轮询间隔: {interval} 秒")
     if target_agent:
@@ -377,4 +377,4 @@ def _daemon_loop(stale_minutes, target_agent, as_json, interval, auto_rotate=Fal
 
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("\n  上帝之鞭已收起")
+        print("\n  耕田之鞭已收起")

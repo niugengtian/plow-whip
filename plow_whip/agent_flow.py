@@ -893,8 +893,8 @@ def main():
     btp.add_argument("--tab", type=int, required=True, help="Tab index (1-based)")
     btp.add_argument("--name", help="Tab name (for display)")
 
-    # whip — God's whip / 上帝之鞭
-    whip_parser = sub.add_parser("whip", help="God's whip — actively drive agents to work")
+    # whip — plow-whip / 耕田之鞭
+    whip_parser = sub.add_parser("whip", help="plow-whip — actively drive agents to work")
     whip_parser.add_argument("--agent", help="Target specific agent to whip")
     whip_parser.add_argument("--stale-minutes", type=int, help="Stale threshold in minutes (default 60)")
     whip_parser.add_argument("--json", action="store_true", help="Output as JSON")

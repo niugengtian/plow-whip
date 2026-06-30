@@ -57,7 +57,7 @@ def send_notification(agent: str, task: dict):
     prompt = task.get("prompt", "新任务")[:100]
     message = f"[{project}] {prompt}"
     
-    script = f'display notification "{message}" with title "🪢 上帝之鞭 — {agent} 被鞭了!" sound name "Glass"'
+    script = f'display notification "{message}" with title "🪢 耕田之鞭 — {agent} 被鞭了!" sound name "Glass"'
     try:
         subprocess.run(
             ["osascript", "-e", script],
@@ -91,7 +91,7 @@ def watch_inbox(agent: str, interval: float):
     inbox_file = get_inbox_file(agent)
     last_mtime = 0
     
-    print(f"🪢 上帝之鞭 — 监听 {agent} 的 inbox")
+    print(f"🪢 耕田之鞭 — 监听 {agent} 的 inbox")
     print(f"   文件: {inbox_file}")
     print(f"   间隔: {interval} 秒")
     print(f"   Ctrl+C 退出")
