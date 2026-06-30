@@ -54,7 +54,7 @@ def _is_stale(state: dict, threshold_minutes: int) -> bool:
     updated = _parse_updated_at(state.get("updated_at", ""))
     if updated is None:
         return True  # 从未更新过 → 也算摸鱼
-    return datetime.now() - updated > timedelta(minutes=threshold_minutes)
+    return datetime.now().astimezone() - updated > timedelta(minutes=threshold_minutes)
 
 
 def _staleness_info(state: dict) -> str:
@@ -62,7 +62,7 @@ def _staleness_info(state: dict) -> str:
     updated = _parse_updated_at(state.get("updated_at", ""))
     if updated is None:
         return "从未更新"
-    delta = datetime.now() - updated
+    delta = datetime.now().astimezone() - updated
     total_seconds = int(delta.total_seconds())
     if total_seconds < 60:
         return f"{total_seconds}秒前"
