@@ -49,8 +49,10 @@ def _agent_cli_available(agent: str) -> bool:
     """检查 agent 的 CLI 是否可用。"""
     cli_map = {
         "codex": "codex",
+        "codex_cli": "codex",
         "cursor": "cursor",
         "qoder": "qoderclicn",
+        "qoder_cli": "qoderclicn",
     }
     cmd = cli_map.get(agent)
     if not cmd:
@@ -68,13 +70,22 @@ def _agent_cli_available(agent: str) -> bool:
 def available_channels(agent: str) -> list:
     """返回指定 agent 当前可用的投递通道列表（按优先级）。"""
     channels = []
-    # qoder_cli 是最优通道（真正自动唤醒）
-    if agent == "qoder" and _agent_cli_available("qoder"):
+    
+    # CLI 通道（最优，真正自动唤醒）
+    if agent in ("qoder", "qoder_cli") and _agent_cli_available("qoder"):
         channels.append("qoder_cli")
-    if agent == "qoder" and _zellij_available():
+    if agent in ("codex", "codex_cli") and _agent_cli_available("codex"):
+        channels.append("codex_cli")
+    
+    # zellij 通道（qoder 专属）
+    if agent in ("qoder", "qoder_cli") and _zellij_available():
         channels.append("zellij")
+    
+    # 通用 CLI 通道
     if _agent_cli_available(agent):
         channels.append("cli")
+    
+    # 兜底通道
     channels.append("file")
     channels.append("notify")
     return channels
@@ -170,6 +181,59 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
         return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 未安装"}
 
 
+def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
+    """
+    通过 codex CLI Print 模式直接唤醒 Codex 执行任务。
+    """
+    # 获取项目路径
+    projects_dir = af.get_projects_dir()
+    project_path = os.path.join(projects_dir, project)
+    
+    if not os.path.isdir(project_path):
+        return {"success": False, "channel": "codex_cli", "detail": f"项目路径不存在: {project_path}"}
+    
+    # 构造 prompt 指令
+    full_prompt = f"""plow-whip wakeup: {project} 项目被上帝之鞭唤醒。
+
+请执行以下任务:
+{prompt}
+
+完成后:
+1. 更新 AGENT_STATE.json (handoff)
+2. 写进度到 AGENT_COMMS.md
+3. 清空 ~/.plow-whip/inbox/codex.json 中对应任务"""
+    
+    cmd = [
+        "codex",
+        "-q", full_prompt,
+        "--cwd", project_path,
+        "--full-auto",
+    ]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=300,  # 5 分钟超时
+        )
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "channel": "codex_cli",
+                "detail": f"Codex CLI 已在 {project_path} 执行任务",
+                "output": result.stdout[:500] if result.stdout else "",
+            }
+        return {
+            "success": False,
+            "channel": "codex_cli",
+            "detail": f"codex 返回 {result.returncode}: {result.stderr[:200]}",
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "channel": "codex_cli", "detail": "codex 超时 (5分钟)"}
+    except FileNotFoundError:
+        return {"success": False, "channel": "codex_cli", "detail": "codex 未安装"}
+
+
 def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
     """
     写入任务收件箱文件。
@@ -233,6 +297,9 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
         if ch == "qoder_cli":
             max_turns = kwargs.get("max_turns", 20)
             result = _dispatch_qoder_cli(prompt, project, max_turns)
+        elif ch == "codex_cli":
+            max_turns = kwargs.get("max_turns", 20)
+            result = _dispatch_codex_cli(prompt, project, max_turns)
         elif ch == "zellij":
             target_tab = kwargs.get("target_tab")
             result = _dispatch_zellij(prompt, project, target_tab)

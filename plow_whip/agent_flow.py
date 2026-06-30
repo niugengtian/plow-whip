@@ -33,10 +33,25 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ROTATE_MAX_LINES = 100
 ROTATE_MAX_KB = 8
 
-DEFAULT_AGENTS = ["qoder", "codex", "cursor"]
+DEFAULT_AGENTS = ["qoder_cli", "codex_cli", "pm", "human"]
+# 别名映射（兼容旧名称）
+AGENT_ALIASES = {
+    "qoder": "qoder_cli",
+    "codex": "codex_cli",
+    "pm": "pm",
+    "human": "human",
+}
 
-AGENT_LABEL = {"qoder": "Qoder (PM + Architect)", "codex": "Codex (Code Owner)", "cursor": "Cursor (Bug Reporter)"}
-AGENT_EMOJI = {"qoder": "🔵", "codex": "🟢", "cursor": "🟡"}
+AGENT_LABEL = {"qoder_cli": "Qoder CLI (执行者)", "codex_cli": "Codex CLI (代码手)", "pm": "PM (Qoder Desktop)", "human": "Human (老板)", "qoder": "Qoder CLI (执行者)", "codex": "Codex CLI (代码手)"}
+AGENT_EMOJI = {
+    "qoder_cli": "🔵",
+    "codex_cli": "🟢",
+    "pm": "🟣",
+    "human": "👤",
+    # 兼容旧名称
+    "qoder": "🔵",
+    "codex": "🟢",
+}
 
 
 def load_config():
@@ -523,16 +538,7 @@ def cmd_sync():
         conventions_path = os.path.join(projects_dir, p, "collab", "CONVENTIONS.md")
         if write_rendered(conventions_path, "CONVENTIONS.md.tpl", p):
             updated.append("CONVENTIONS.md")
-        # Sync memory templates
-        mem_dir = os.path.join(projects_dir, p, "collab", "memory")
-        if os.path.isdir(mem_dir):
-            for tpl_name, out_name in [
-                ("PROJECT.md.tpl", "PROJECT.md"),
-                ("CURRENT_STATUS.md.tpl", "CURRENT_STATUS.md"),
-            ]:
-                target = os.path.join(mem_dir, out_name)
-                if write_rendered(target, f"memory/{tpl_name}", p):
-                    updated.append(out_name)
+        # Note: memory files are project-specific, NOT synced
         status = "✅ " + ", ".join(updated) if updated else "⚪ no changes"
         print(f"  {p:20s} {status}")
     print()
