@@ -421,6 +421,48 @@ def scan_md_activity(project):
     return results
 
 
+
+
+def _show_tail_and_judge(project, rel_path, info):
+    """Show last 20 lines of an untracked file and judge if it should be tracked."""
+    collab_dir = project_collab_dir(project)
+    fpath = os.path.join(collab_dir, rel_path)
+    if not os.path.exists(fpath):
+        return
+
+    with open(fpath, encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    tail_n = min(20, len(all_lines))
+    tail_lines = all_lines[-tail_n:]
+
+    print(f"     ── 最后 {tail_n} 行 ──")
+    for line in tail_lines:
+        stripped = line.rstrip()
+        if stripped:
+            print(f"       | {stripped[:80]}")
+
+    # Judgment: is this a living document or a reference doc?
+    tail_text = "".join(tail_lines).lower()
+    
+    # Signs of a living document (frequently updated, should be tracked)
+    living_signs = ["handoff", "update", "progress", "status", "todo", "next",
+                    "done", "block", "sprint", "day ", "更新", "进度", "交接"]
+    living_hits = sum(1 for s in living_signs if s in tail_text)
+
+    # Signs of a reference doc (stable, should NOT be tracked)
+    ref_signs = ["convention", "rule", "policy", "约定", "规范", "规则",
+                 "template", "模板", "guide", "指南", "reference", "参考"]
+    ref_hits = sum(1 for s in ref_signs if s in tail_text)
+
+    if ref_hits > living_hits:
+        print(f"     📖 判断: 参考文档（不宜轮转）")
+    elif living_hits >= 2:
+        print(f"     📝 判断: 活跃协作文档 → 建议加入 TRACKED_COLLAB_FILES")
+    else:
+        print(f"     ❓ 判断: 不确定，需人工确认")
+
+
 def cmd_memory_rotate(project, args):
     """memory-rotate subcommand: check and rotate all collab/memory files."""
     scan_only = getattr(args, "scan", False)
@@ -441,13 +483,13 @@ def cmd_memory_rotate(project, args):
             agents = ", ".join(r["active_agents"][:3]) if r["active_agents"] else "—"
             print(f"  {r['file']:35s} {r['lines']:>6d} {r['size_kb']:>6.1f}KB {rot:>7s} {trk:>8s} {agents}")
 
-        # Highlight untracked but active files
+        # Highlight untracked but active files with tail + judgment
         untracked_active = [r for r in results if not r["is_tracked"] and r["is_active"]]
         if untracked_active:
             print(f"\n  ⚠️  {len(untracked_active)} untracked but active .md file(s):")
             for r in untracked_active:
-                print(f"     → {r['file']} (agents: {', '.join(r['active_agents'][:3])})")
-            print(f"     Consider adding to TRACKED_COLLAB_FILES for auto-rotation.")
+                print(f"\n     → {r['file']} ({r['lines']}L, {r['size_kb']}KB, agents: {', '.join(r['active_agents'][:3])})")
+                _show_tail_and_judge(project, r["file"], r)
         print()
         return
 
@@ -489,8 +531,9 @@ def cmd_memory_rotate(project, args):
     if untracked_active:
         print(f"  ⚠️  {len(untracked_active)} active but untracked file(s):")
         for r in untracked_active:
-            print(f"     → {r['file']} ({r['lines']}L, agents: {', '.join(r['active_agents'][:3])})")
-        print(f"     Run with --scan to review and decide.")
+            print(f"\n     → {r['file']} ({r['lines']}L, {r['size_kb']}KB, agents: {', '.join(r['active_agents'][:3])})")
+            # Show last 20 lines for decision
+            _show_tail_and_judge(project, r["file"], r)
     else:
         print(f"  ✅ All active .md files are tracked")
     print()
