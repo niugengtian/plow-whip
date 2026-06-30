@@ -33,24 +33,31 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ROTATE_MAX_LINES = 100
 ROTATE_MAX_KB = 8
 
-DEFAULT_AGENTS = ["qoder_cli", "codex_cli", "pm", "human"]
-# 别名映射（兼容旧名称）
-AGENT_ALIASES = {
-    "qoder": "qoder_cli",
-    "codex": "codex_cli",
-    "pm": "pm",
-    "human": "human",
-}
+# Collab file rotation thresholds (stricter — these are shared files)
+COLLAB_FILE_MAX_LINES = 80
+COLLAB_FILE_MAX_KB = 6
+COLLAB_KEEP_RECENT_LINES = 30  # When truncating, keep the most recent N lines
 
-AGENT_LABEL = {"qoder_cli": "Qoder CLI (执行者)", "codex_cli": "Codex CLI (代码手)", "pm": "PM (Qoder Desktop)", "human": "Human (老板)", "qoder": "Qoder CLI (执行者)", "codex": "Codex CLI (代码手)"}
+# Files tracked for auto-rotation in collab/
+TRACKED_COLLAB_FILES = [
+    "AGENT_COMMS.md",
+    "memory/DECISIONS.md",
+    "memory/CHANGELOG.md",
+    "memory/CURRENT_STATUS.md",
+    "memory/NEXT_ACTION.md",
+    "memory/ROADMAP.md",
+]
+
+# Agent mention patterns for activity detection
+AGENT_PATTERNS = ["qoder", "qoder_cli", "codex", "codex_cli", "@qoder", "@codex", "handoff", "plow-whip"]
+
+DEFAULT_AGENTS = ["qoder", "qoder_cli", "codex", "codex_cli"]
+AGENT_LABEL = {"qoder": "Qoder CN (PM+架构师)", "qoder_cli": "Qoder CLI (审查+验收)", "codex": "Codex (闲置/学习)", "codex_cli": "Codex CLI (Code Owner)"}
 AGENT_EMOJI = {
-    "qoder_cli": "🔵",
-    "codex_cli": "🟢",
-    "pm": "🟣",
-    "human": "👤",
-    # 兼容旧名称
     "qoder": "🔵",
+    "qoder_cli": "🔷",
     "codex": "🟢",
+    "codex_cli": "🟩",
 }
 
 
@@ -234,6 +241,261 @@ def cmd_status(project):
     print()
 
 
+
+def _needs_rotation(project, agent):
+    """Check if an agent's current.md exceeds rotation thresholds."""
+    curr = os.path.join(conversations_dir(project), agent, "current.md")
+    if not os.path.exists(curr):
+        return False, 0, 0
+    size = os.path.getsize(curr)
+    with open(curr, encoding="utf-8") as f:
+        line_count = len(f.readlines())
+    return (line_count > ROTATE_MAX_LINES or size > ROTATE_MAX_KB * 1024), line_count, size
+
+
+def check_and_rotate_agent(project, agent, topic=None):
+    """Auto-rotate an agent's session if it exceeds thresholds.
+    Returns True if rotation was performed, False otherwise."""
+    needs, lines, size = _needs_rotation(project, agent)
+    if not needs:
+        return False
+
+    curr = os.path.join(conversations_dir(project), agent, "current.md")
+    with open(curr, encoding="utf-8") as f:
+        content = f.read()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_topic = (topic or "auto_session").replace(" ", "_").replace("/", "-")[:40]
+    archive_name = f"{timestamp}_{safe_topic}.md"
+    archive_path = os.path.join(conversations_dir(project), agent, archive_name)
+
+    with open(archive_path, "w", encoding="utf-8") as f:
+        f.write(f"# Archived Session: {safe_topic}\n")
+        f.write(f"**AI:** {agent}\n")
+        f.write(f"**Archived:** {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"**Project:** {project}\n")
+        f.write(f"**Trigger:** auto-rotation ({lines} lines, {size / 1024:.1f}KB)\n\n")
+        f.write("## Original Content\n\n")
+        f.write(content)
+
+    _write_session_template(agent, project, curr)
+    print(f"🔄 Auto-rotated: {agent} ({lines} lines, {size / 1024:.1f}KB → {archive_name})")
+    notify(f"[auto-rotated] {agent}: {safe_topic}")
+    return True
+
+
+def auto_rotate_all_agents(project):
+    """Check and rotate all agents + collab files in a project. Returns summary dict."""
+    rotated_agents = []
+    for agent in get_agents():
+        if check_and_rotate_agent(project, agent, topic="auto_daemon"):
+            rotated_agents.append(agent)
+    rotated_files = auto_rotate_collab_files(project)
+    return {"agents": rotated_agents, "files": rotated_files}
+
+
+# ── Collab File Auto-Rotation ──────────────────────────────────────────────────
+
+def _collab_file_path(project, rel_path):
+    """Get absolute path for a collab file."""
+    return os.path.join(project_collab_dir(project), rel_path)
+
+
+def _file_needs_rotation(filepath, max_lines=None, max_kb=None):
+    """Check if a file exceeds rotation thresholds."""
+    if not os.path.exists(filepath):
+        return False, 0, 0
+    max_lines = max_lines or COLLAB_FILE_MAX_LINES
+    max_kb = max_kb or COLLAB_FILE_MAX_KB
+    size = os.path.getsize(filepath)
+    with open(filepath, encoding="utf-8") as f:
+        line_count = len(f.readlines())
+    return (line_count > max_lines or size > max_kb * 1024), line_count, size
+
+
+def _archive_collab_file(project, rel_path, topic=None):
+    """Archive a collab file: keep recent content, move old content to archive.
+    Returns True if archived, False otherwise."""
+    filepath = _collab_file_path(project, rel_path)
+    if not os.path.exists(filepath):
+        return False
+
+    needs, lines, size = _file_needs_rotation(filepath)
+    if not needs:
+        return False
+
+    with open(filepath, encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    # Split: old content (to archive) + recent content (to keep)
+    keep_n = min(COLLAB_KEEP_RECENT_LINES, len(all_lines))
+    old_lines = all_lines[:-keep_n]
+    recent_lines = all_lines[-keep_n:]
+
+    if not old_lines:
+        return False  # Nothing to archive
+
+    # Create archive file
+    archive_dir = os.path.join(project_memory_dir(project), "sessions")
+    os.makedirs(archive_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = rel_path.replace("/", "_").replace(".md", "")
+    safe_topic = (topic or safe_name).replace(" ", "_")[:40]
+    archive_name = f"{timestamp}_{safe_topic}.md"
+    archive_path = os.path.join(archive_dir, archive_name)
+
+    with open(archive_path, "w", encoding="utf-8") as f:
+        f.write(f"# Archived: {rel_path}\n")
+        f.write(f"**Project:** {project}\n")
+        f.write(f"**Archived:** {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"**Trigger:** auto-rotation ({lines} lines, {size / 1024:.1f}KB)\n")
+        f.write(f"**Lines archived:** {len(old_lines)}\n\n")
+        f.write("## Archived Content\n\n")
+        f.writelines(old_lines)
+
+    # Rewrite original with only recent content
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(f"<!-- Previous content archived to: {archive_path} -->\n")
+        f.writelines(recent_lines)
+
+    print(f"🔄 Archived: {rel_path} ({lines}L → keep {keep_n}L, archived {len(old_lines)}L)")
+    return True
+
+
+def auto_rotate_collab_files(project):
+    """Check and rotate all tracked collab files. Returns list of rotated file names."""
+    rotated = []
+    for rel_path in TRACKED_COLLAB_FILES:
+        if _archive_collab_file(project, rel_path, topic=rel_path.replace("/", "_")):
+            rotated.append(rel_path)
+    return rotated
+
+
+def scan_md_activity(project):
+    """Scan all .md files in collab/, analyze last 10 lines for agent activity.
+    Returns list of dicts with file info and activity detection."""
+    collab_dir = project_collab_dir(project)
+    if not os.path.isdir(collab_dir):
+        return []
+
+    results = []
+    for root, dirs, files in os.walk(collab_dir):
+        # Skip conversations/ (handled separately) and archive dirs
+        dirs[:] = [d for d in dirs if d not in ("conversations", "sessions", "archive", "sprints", "adr")]
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, collab_dir)
+
+            with open(fpath, encoding="utf-8") as f:
+                all_lines = f.readlines()
+
+            total_lines = len(all_lines)
+            size = os.path.getsize(fpath)
+            last_10 = all_lines[-10:] if len(all_lines) >= 10 else all_lines
+            last_10_text = "".join(last_10).lower()
+
+            # Detect agent activity in last 10 lines
+            active_agents = set()
+            for pattern in AGENT_PATTERNS:
+                if pattern.lower() in last_10_text:
+                    active_agents.add(pattern)
+
+            needs, _, _ = _file_needs_rotation(fpath)
+            is_tracked = rel in TRACKED_COLLAB_FILES
+
+            results.append({
+                "file": rel,
+                "lines": total_lines,
+                "size_kb": round(size / 1024, 1),
+                "needs_rotation": needs,
+                "is_tracked": is_tracked,
+                "active_agents": sorted(active_agents),
+                "is_active": len(active_agents) > 0,
+            })
+
+    # Sort: active + untracked first (candidates for tracking), then by size desc
+    results.sort(key=lambda r: (not r["is_active"] or r["is_tracked"], -r["lines"]))
+    return results
+
+
+def cmd_memory_rotate(project, args):
+    """memory-rotate subcommand: check and rotate all collab/memory files."""
+    scan_only = getattr(args, "scan", False)
+
+    if scan_only:
+        # Just scan and report
+        print(f"\n🔍 Scanning .md activity (project: {project}):\n")
+        results = scan_md_activity(project)
+        if not results:
+            print("  No .md files found.")
+            return
+
+        print(f"  {'File':35s} {'Lines':>6s} {'Size':>7s} {'Rotate':>7s} {'Tracked':>8s} {'Active Agents'}")
+        print(f"  {'─' * 35} {'─' * 6} {'─' * 7} {'─' * 7} {'─' * 8} {'─' * 20}")
+        for r in results:
+            rot = "🔴 YES" if r["needs_rotation"] else "🟢 ok"
+            trk = "✅" if r["is_tracked"] else "❌"
+            agents = ", ".join(r["active_agents"][:3]) if r["active_agents"] else "—"
+            print(f"  {r['file']:35s} {r['lines']:>6d} {r['size_kb']:>6.1f}KB {rot:>7s} {trk:>8s} {agents}")
+
+        # Highlight untracked but active files
+        untracked_active = [r for r in results if not r["is_tracked"] and r["is_active"]]
+        if untracked_active:
+            print(f"\n  ⚠️  {len(untracked_active)} untracked but active .md file(s):")
+            for r in untracked_active:
+                print(f"     → {r['file']} (agents: {', '.join(r['active_agents'][:3])})")
+            print(f"     Consider adding to TRACKED_COLLAB_FILES for auto-rotation.")
+        print()
+        return
+
+    # Full rotation mode
+    print(f"\n🔄 Memory rotation (project: {project}):\n")
+
+    # 1. Rotate agent sessions
+    print("  ── Agent Sessions ──")
+    for agent in get_agents():
+        needs, lines, size = _needs_rotation(project, agent)
+        status = "🔴" if needs else "🟢"
+        print(f"  {status} {agent:12s} — {lines} lines, {size / 1024:.1f}KB")
+    rotated_agents = []
+    for agent in get_agents():
+        if check_and_rotate_agent(project, agent, topic="memory_rotate"):
+            rotated_agents.append(agent)
+    if rotated_agents:
+        print(f"  ✅ Rotated: {', '.join(rotated_agents)}")
+    else:
+        print(f"  ✅ No agent sessions need rotation")
+
+    # 2. Rotate collab files
+    print(f"\n  ── Collab/Memory Files ──")
+    for rel_path in TRACKED_COLLAB_FILES:
+        fpath = _collab_file_path(project, rel_path)
+        needs, lines, size = _file_needs_rotation(fpath)
+        status = "🔴" if needs else "🟢"
+        print(f"  {status} {rel_path:30s} — {lines} lines, {size / 1024:.1f}KB")
+    rotated_files = auto_rotate_collab_files(project)
+    if rotated_files:
+        print(f"  ✅ Rotated: {', '.join(rotated_files)}")
+    else:
+        print(f"  ✅ No collab files need rotation")
+
+    # 3. Scan for new active files
+    print(f"\n  ── Activity Scan ──")
+    results = scan_md_activity(project)
+    untracked_active = [r for r in results if not r["is_tracked"] and r["is_active"]]
+    if untracked_active:
+        print(f"  ⚠️  {len(untracked_active)} active but untracked file(s):")
+        for r in untracked_active:
+            print(f"     → {r['file']} ({r['lines']}L, agents: {', '.join(r['active_agents'][:3])})")
+        print(f"     Run with --scan to review and decide.")
+    else:
+        print(f"  ✅ All active .md files are tracked")
+    print()
+
+
 def cmd_handoff(project, args):
     state = load_state(project)
     current = state["current_agent"]
@@ -265,6 +527,15 @@ def cmd_handoff(project, args):
     print(f"➡️  {next_agent} please: {state['next_action'] or '(check status)'}")
     print()
     notify(f"[{project}] {current} → {next_agent}", ring=True)
+
+    # ── Auto-rotate: check the agent that just finished ──
+    handoff_topic = args.topic or state.get("phase", "handoff")
+    rotated = check_and_rotate_agent(project, current, topic=f"handoff_{handoff_topic}")
+    if rotated:
+        print(f"   ✂️  {current}'s session auto-rotated (exceeded threshold)")
+    else:
+        needs, lines, size = _needs_rotation(project, current)
+        print(f"   📝 {current} session: {lines} lines, {size / 1024:.1f}KB — no rotation needed")
 
 
 def cmd_reset(project):
@@ -604,6 +875,10 @@ def main():
     # sessions-overview
     sub.add_parser("sessions-overview", help="All sessions overview")
 
+    # memory-rotate — check and rotate all collab/memory files
+    mr = sub.add_parser("memory-rotate", help="Check and rotate all collab/memory files")
+    mr.add_argument("--scan", action="store_true", help="Scan only, show activity without rotating")
+
     # sync
     sub.add_parser("sync", help="Sync framework templates to all projects")
 
@@ -622,6 +897,8 @@ def main():
     whip_parser.add_argument("--channel", choices=["zellij", "file", "notify"], help="Force specific dispatch channel")
     whip_parser.add_argument("--daemon", action="store_true", help="Continuous monitoring mode")
     whip_parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval in seconds (default 300)")
+    whip_parser.add_argument("--force", action="store_true", help="Force dispatch even if project is not stale")
+    whip_parser.add_argument("--auto-rotate", action="store_true", help="Auto-rotate sessions that exceed size thresholds")
 
 
     # permit 子命令
@@ -686,6 +963,8 @@ def main():
         cmd_rotate(project, args.agent, args)
     elif args.command == "sessions-overview":
         cmd_sessions_overview(project)
+    elif args.command == "memory-rotate":
+        cmd_memory_rotate(project, args)
 
 
 if __name__ == "__main__":

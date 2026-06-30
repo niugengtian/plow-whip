@@ -249,7 +249,7 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
         result = subprocess.run(
             cmd,
             capture_output=True, text=True,
-            timeout=300,  # 5 分钟超时
+            timeout=timeout,  # 默认 30 分钟
         )
         if result.returncode == 0:
             return {
@@ -269,9 +269,10 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
         return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 未安装"}
 
 
-def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
+def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 1800) -> dict:
     """
     通过 codex CLI Print 模式直接唤醒 Codex 执行任务。
+    timeout 默认 1800 秒（30 分钟），Sprint 级任务需要足够时间。
     """
     # 获取项目路径
     projects_dir = af.get_projects_dir()
@@ -304,7 +305,7 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
         result = subprocess.run(
             cmd,
             capture_output=True, text=True,
-            timeout=300,  # 5 分钟超时
+            timeout=timeout,  # 默认 30 分钟
         )
         if result.returncode == 0:
             return {
@@ -319,7 +320,8 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20) -> dict:
             "detail": f"codex 返回 {result.returncode}: {result.stderr[:200]}",
         }
     except subprocess.TimeoutExpired:
-        return {"success": False, "channel": "codex_cli", "detail": "codex 超时 (5分钟)"}
+        timeout_min = timeout // 60
+        return {"success": False, "channel": "codex_cli", "detail": f"codex 超时 ({timeout_min}分钟)"}
     except FileNotFoundError:
         return {"success": False, "channel": "codex_cli", "detail": "npx 或 @openai/codex 未安装"}
 
@@ -389,7 +391,8 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
             result = _dispatch_qoder_cli(prompt, project, max_turns)
         elif ch == "codex_cli":
             max_turns = kwargs.get("max_turns", 20)
-            result = _dispatch_codex_cli(prompt, project, max_turns)
+            timeout = kwargs.get("timeout", 1800)
+            result = _dispatch_codex_cli(prompt, project, max_turns, timeout)
         elif ch == "zellij":
             target_tab = kwargs.get("target_tab")
             result = _dispatch_zellij(prompt, project, target_tab)

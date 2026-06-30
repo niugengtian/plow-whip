@@ -187,8 +187,10 @@ def cmd_whip(args):
     auto_crack = getattr(args, "auto_crack", False)
     force_channel = getattr(args, "channel", None)
 
+    auto_rotate = getattr(args, 'auto_rotate', False)
+
     if auto_crack:
-        _auto_crack_loop(stale_minutes, target_agent, daemon_interval, force_channel)
+        _auto_crack_loop(stale_minutes, target_agent, daemon_interval, force_channel, auto_rotate=auto_rotate)
         return
 
     results = scan_all_projects(stale_minutes)
@@ -201,8 +203,10 @@ def cmd_whip(args):
         print("所有项目已完成，无人需要鞭策。")
         return
 
+    force = getattr(args, "force", False)
+
     if crack:
-        _crack(results, force_channel)
+        _crack(results, force_channel, force=force)
         return
 
     if as_json:
@@ -256,12 +260,12 @@ def _print_whip_report(results: list):
         af.notify(f"{stale_count} 个项目需要鞭策!", ring=True)
 
 
-def _crack(results: list, force_channel: str = None):
+def _crack(results: list, force_channel: str = None, force: bool = False):
     """
     抽鞭子！将任务投递给每个摸鱼的 agent。
     对每个 stale 项目，生成 prompt 并通过 dispatch 投递。
     """
-    stale = [r for r in results if r.get("stale")]
+    stale = [r for r in results if r.get("stale") or force]
     if not stale:
         print("没有摸鱼项目，无需抽鞭。")
         return
@@ -285,7 +289,7 @@ def _crack(results: list, force_channel: str = None):
         print()
 
 
-def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel):
+def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_rotate=False):
     """
     自动挥舞模式：持续扫描，发现摸鱼就自动抽鞭。
     这是真正的"上帝之鞭" — 不需要人介入，自动驱动 agent 干活。
@@ -297,6 +301,8 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel):
         print(f"   目标: 只鞭策 {target_agent}")
     if force_channel:
         print(f"   通道: 强制 {force_channel}")
+    if auto_rotate:
+        print(f"   ✂️  自动轮转: 已启用")
     print("   Ctrl+C 收起鞭子\n")
 
     try:
@@ -305,6 +311,11 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel):
             results = filter_active(results)
             if target_agent:
                 results = filter_by_agent(results, target_agent)
+
+            # Auto-rotate: check all active projects' sessions + collab files
+            if auto_rotate:
+                for r in results:
+                    af.auto_rotate_all_agents(r["project"])
 
             stale = [r for r in results if r["stale"]]
             if stale:
@@ -320,13 +331,15 @@ def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel):
         print("\n  上帝之鞭已收起")
 
 
-def _daemon_loop(stale_minutes, target_agent, as_json, interval):
+def _daemon_loop(stale_minutes, target_agent, as_json, interval, auto_rotate=False):
     """持续监控模式。"""
     print("  上帝之鞭 — 持续监控模式")
     print(f"   摸鱼阈值: {stale_minutes} 分钟")
     print(f"   轮询间隔: {interval} 秒")
     if target_agent:
         print(f"   目标: 只鞭策 {target_agent}")
+    if auto_rotate:
+        print(f"   ✂️  自动轮转: 已启用")
     print("   Ctrl+C 退出\n")
 
     try:
@@ -335,6 +348,11 @@ def _daemon_loop(stale_minutes, target_agent, as_json, interval):
             results = filter_active(results)
             if target_agent:
                 results = filter_by_agent(results, target_agent)
+
+            # Auto-rotate: check all active projects' sessions + collab files
+            if auto_rotate:
+                for r in results:
+                    af.auto_rotate_all_agents(r["project"])
 
             stale = [r for r in results if r["stale"]]
             if stale:
