@@ -234,3 +234,42 @@ Auto-classification: keyword matching + length weight + code block detection
 ### License
 
 MIT
+
+### Qoder CN IDE Session Manager
+
+针对 [Qoder CN](https://qoder.cn) IDE 的会话历史管理模块。
+
+**背景**：Qoder CN 采用 JSONL 格式存储会话历史，随着对话增长会导致上下文膨胀。
+本模块提供自动轮转、安全切割、索引检索和回退机制。
+
+```bash
+# 轮转超阈值会话（配合 launchd 定时任务）
+python -m plow_whip.qoder_session rotate
+
+# 列出所有归档
+python -m plow_whip.qoder_session archives
+
+# 回退最近一次归档
+python -m plow_whip.qoder_session rollback --task task-037
+
+# 搜索历史会话
+python -m plow_whip.qoder_session search "Sprint"
+```
+
+**Python API**：
+```python
+from plow_whip.qoder_session import QoderSessionManager
+
+mgr = QoderSessionManager()
+mgr.run_rotation()                    # 执行轮转
+results = mgr.search_sessions("API")  # 搜索历史
+mgr.rollback_latest("task-037")       # 回退
+```
+
+**自动轮转配置**（launchd）：
+- 脚本位置：`~/.plow-whip/qoder_session_manager.py`
+- 配置文件：`~/.plow-whip/qoder_sessions.yaml`
+- 执行频率：每 30 分钟
+
+详见 [docs/qoder-cn-api-suggestion.md](docs/qoder-cn-api-suggestion.md) 了解我们对 Qoder CN 官方提供会话 API 的建议。
+
