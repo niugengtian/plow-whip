@@ -11,6 +11,7 @@
 | D-007 | 2026-07-12 | `memory-budget` 零正文预算仪表 + 轮转 `Carry Forward` 摘要 | Accepted |
 | D-008 | 2026-07-12 | P-1 零号启动协议：先 `doctor --repair`，再进入项目工作 | Accepted |
 | D-009 | 2026-07-12 | 禁止 Agent 自行开子智能体，除非用户临时明确指定 | Accepted |
+| D-010 | 2026-07-12 | 项目边界原则：禁止越过当前项目目录修改全局配置或其他项目 | Accepted |
 
 ## D-002: Safe file deletion via by_rm archive
 
@@ -87,3 +88,13 @@
 - **Rule:** 除非用户在当前任务中临时明确指定，否则任何 Agent 不允许自行创建、调用、委派或并行启动子智能体。所有跨 Agent 作业必须通过 plow-whip 的三层记忆、留言板、状态机和 handoff/drive 机制接力。
 - **Reason:** 防止子智能体绕过 `doctor --repair -> context-pack -> CONVENTIONS.md`，产生 Hot/Warm/Cold 三层记忆断层、token 成本失控和责任边界不清。
 - **Enforcement:** `CONVENTIONS.md` 【P-0.5】；`plow_whip/templates/CONVENTIONS.md.tpl`；如用户临时允许子智能体，输出必须回填到当前 agent 会话记忆、`AGENT_COMMS.md` 或 handoff 记录。
+
+
+## D-010: Project boundary principle
+
+- **Date:** 2026-07-12
+- **Author:** Human + Codex
+- **Status:** ✅ Accepted
+- **Rule:** 除非用户在当前任务中明确指定路径，否则 Agent 只能读取和修改当前项目根目录内的文件。禁止擅自修改 `~/.plow-whip/config.json`、其他项目目录、其他项目 `collab/`、其他项目 agent 会话文件或全局 agent 阵容。
+- **Reason:** 防止一个项目的 agent 阵容污染另一个项目，避免误删或误改其他项目会话造成三层记忆断层。
+- **Enforcement:** `CONVENTIONS.md` 【P-0.75】；`plow_whip/templates/CONVENTIONS.md.tpl`；发现项目外风险时只报告，不代改；误触项目外文件时必须立即停止、说明并恢复。

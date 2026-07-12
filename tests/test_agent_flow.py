@@ -101,6 +101,16 @@ class TestInit(PlowWhipTestBase):
         self.assertIn("不允许自行创建、调用、委派或并行启动子智能体", conventions)
         self.assertIn("D-009", conventions)
 
+
+    def test_init_writes_project_boundary_rule(self):
+        cmd_init("TestProject")
+        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
+        with open(conventions_path, encoding="utf-8") as f:
+            conventions = f.read()
+        self.assertIn("项目边界原则", conventions)
+        self.assertIn("只能读取和修改当前项目根目录内的文件", conventions)
+        self.assertIn("D-010", conventions)
+
     def test_init_creates_valid_state(self):
         cmd_init("TestProject")
         state = load_state("TestProject")
