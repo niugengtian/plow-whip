@@ -9,7 +9,7 @@
 **任何 Agent 进入项目、打开新会话、接到任务或准备改文件前，第一件事必须检查 plow-whip 机制是否存在。**
 
 ```bash
-plow-whip --project {PROJECT_NAME} doctor --repair
+plow-whip --project plow-whip doctor --repair
 ```
 
 规则：
@@ -79,7 +79,7 @@ mv src/old_module.py by_rm/src/old_module_20260709_165000.py
 ```bash
 plow-whip agent list
 plow-whip agent set builder --role "Code Owner" --assignment "Implement scoped tasks and report checks"
-plow-whip --project {PROJECT_NAME} agent set reviewer --role "Reviewer" --assignment "Review implementation and risks"
+plow-whip --project plow-whip agent set reviewer --role "Reviewer" --assignment "Review implementation and risks"
 ```
 
 `--project` 存在时，会同步更新该项目的 `AGENT_STATE.json`、`AGENTS.md` 和留言板。
@@ -133,8 +133,8 @@ plow-whip --project {PROJECT_NAME} agent set reviewer --role "Reviewer" --assign
 
 **轮转规则**：
 - 默认按 `agents` 列表顺序轮转。
-- 指定接收方：`plow-whip --project {PROJECT_NAME} handoff --to builder --output "..." --next "..."`
-- 记录阻塞：`plow-whip --project {PROJECT_NAME} handoff --status blocked --blockers "缺少 API key" --output "..." --next "..."`
+- 指定接收方：`plow-whip --project plow-whip handoff --to builder --output "..." --next "..."`
+- 记录阻塞：`plow-whip --project plow-whip handoff --status blocked --blockers "缺少 API key" --output "..." --next "..."`
 
 ---
 
@@ -216,12 +216,10 @@ plow-whip whip --auto-crack --auto-rotate
 ### 三层记忆预算
 
 ```bash
-plow-whip --project {PROJECT_NAME} memory-budget
+plow-whip --project plow-whip memory-budget
 ```
 
 `memory-budget` 只用文件大小估算 token，不读取正文。Hot 层应该每次唤醒都能读；Warm 层只在 context-pack 不够时读；Cold 层只搜索/恢复片段，禁止整层通读。
-
----
 
 ### CLI 驱使与结果盯梢（cursor / codex 编排者必读）
 
@@ -271,7 +269,7 @@ sleep 60 && for a in cursor_cli codex_cli; do
 done
 
 # 或盯状态机变化（零 token）
-plow-whip --project {PROJECT_NAME} watch --interval 30
+plow-whip --project plow-whip watch --interval 30
 ```
 
 #### 通道选择
@@ -283,6 +281,33 @@ plow-whip --project {PROJECT_NAME} watch --interval 30
 | `codex` / `reviewer` Desktop | `whip --crack --channel file` 写 inbox | 盲目 `--crack` 无 `--channel` |
 
 决策记录：`memory/DECISIONS.md` D-004
+
+#### Codex Desktop 驱使 cursor_cli（`drive` 命令）
+
+Codex 无 shell 嵌套 cursor-agent 时，用 plow-whip 一条命令派活 + 后台启动 CLI：
+
+```bash
+# 驱使 cursor_cli（默认：写 inbox + 后台 cursor-agent，立即返回）
+cd /path/to/项目根
+python3 -m plow_whip.agent_flow --project <项目名> drive cursor_cli \
+  --next "任务描述" --from-agent codex
+
+# 若 ~/.plow-whip/config.json 的 projects_dir 不对，显式指定路径：
+python3 -m plow_whip.agent_flow --project plow-whip drive cursor_cli \
+  --project-path "/Users/.../plow-whip" --next "任务" --from-agent codex
+```
+
+# 驱使 codex_cli
+python3 -m plow_whip.agent_flow --project <项目名> drive codex_cli \
+  --next "任务描述" --from-agent codex
+
+# 盯结果（只看日志尾部 + inbox，省 token）
+python3 -m plow_whip.agent_flow --project <项目名> drive cursor_cli --status
+```
+
+`--next` 可省略：自动读 `AGENT_STATE.json` 的 `next_action`。
+
+仅写 inbox、不启动 CLI：`--channel file`
 
 ---
 
@@ -305,8 +330,8 @@ plow-whip --project {PROJECT_NAME} watch --interval 30
 
 ### 通用启动自检（所有 Agent 必须执行）
 
-1. 先运行 `plow-whip --project {PROJECT_NAME} doctor --repair` — 确认 plow-whip 机制存在，缺失则建立
-2. 再运行 `plow-whip --project {PROJECT_NAME} context-pack --agent <自己>` — 读最小上下文包
+1. 先运行 `plow-whip --project plow-whip doctor --repair` — 确认 plow-whip 机制存在，缺失则建立
+2. 再运行 `plow-whip --project plow-whip context-pack --agent <自己>` — 读最小上下文包
 3. 读 `CONVENTIONS.md` **【P-1 + P0】约定** — 确认先自检机制、禁止 `rm`
 4. 只在 context-pack 不够时读 `AGENT_COMMS.md` / `DECISIONS.md` 原文
 5. 写入自己的会话记忆（`conversations/<agent>/current.md`）

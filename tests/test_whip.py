@@ -136,6 +136,7 @@ class TestScanAllProjects(WhipTestBase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["project"], "TestProject")
         self.assertEqual(results[0]["current_agent"], "qoder")
+        self.assertEqual(results[0]["project_path"], os.path.join(self.projects_dir, "TestProject"))
         self.assertFalse(results[0]["stale"])  # 刚初始化，updated_at=now → not stale
 
     def test_scan_multiple_projects(self):
@@ -205,6 +206,23 @@ class TestWhipPrompt(WhipTestBase):
         self.assertIn("2小时前", prompt)
         self.assertIn("Day 3", prompt)
 
+    def test_generate_whip_prompt_points_to_collab_files(self):
+        result = {
+            "project": "TestProject",
+            "current_agent": "codex",
+            "phase": "Sprint 1",
+            "next_action": "实现登录功能",
+            "project_path": os.path.join(self.projects_dir, "TestProject"),
+            "staleness_info": "2小时前",
+            "task_context": {},
+        }
+        prompt = generate_whip_prompt(result)
+        self.assertIn("collab/CONVENTIONS.md", prompt)
+        self.assertIn("collab/AGENT_STATE.json", prompt)
+        self.assertIn("collab/AGENT_COMMS.md", prompt)
+        self.assertIn("collab/memory/NEXT_ACTION.md", prompt)
+        self.assertNotIn("Recent Messages", prompt)
+
     def test_generate_notification_stale(self):
         result = {
             "project": "P1",
@@ -256,6 +274,27 @@ class TestCmdWhip(WhipTestBase):
         af.save_state("Done1", state)
         args = FakeArgs(agent=None, stale_minutes=60, json=False, daemon=False, interval=300)
         cmd_whip(args)  # Should print "all done"
+
+    @patch("plow_whip.whip.dispatch")
+    def test_crack_does_not_dispatch_same_task_twice(self, mock_dispatch):
+        mock_dispatch.return_value = {"success": True, "channel": "file", "detail": "OK"}
+        af.cmd_init("TestProject")
+        state = af.load_state("TestProject")
+        state["updated_at"] = (datetime.now().astimezone() - timedelta(hours=2)).isoformat()
+        af.write_state("TestProject", state, touch=False)
+
+        args = FakeArgs(
+            agent=None, stale_minutes=60, json=False, daemon=False, interval=300,
+            crack=True, auto_crack=False, channel="file", force=False,
+            auto_rotate=False, brain=False,
+        )
+        cmd_whip(args)
+        cmd_whip(args)
+
+        self.assertEqual(mock_dispatch.call_count, 1)
+        state = af.load_state("TestProject")
+        self.assertEqual(state["wake_count"], 1)
+        self.assertTrue(state["last_wake_hash"])
 
 
 class FakeArgs:

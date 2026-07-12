@@ -6,4 +6,8 @@
 
 ## Recent Messages
 
-> **Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.**
+> Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.
+
+---
+
+## Archive

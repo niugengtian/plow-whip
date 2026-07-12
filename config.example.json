@@ -1,0 +1,22 @@
+{
+  "projects_dir": "/absolute/path/to/projects-root",
+  "agents": [
+    "planner",
+    "builder",
+    "reviewer"
+  ],
+  "agent_meta": {
+    "planner": {
+      "role": "PM / Architect",
+      "assignment": "Break work into clear tasks and decide what should happen next."
+    },
+    "builder": {
+      "role": "Code Owner",
+      "assignment": "Implement scoped tasks and report changed files plus checks."
+    },
+    "reviewer": {
+      "role": "Reviewer",
+      "assignment": "Review implementation, run checks, and report risks."
+    }
+  }
+}

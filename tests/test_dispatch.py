@@ -45,7 +45,7 @@ class DispatchTestBase(unittest.TestCase):
 
         save_config({
             "projects_dir": self.projects_dir,
-            "agents": ["qoder", "codex", "cursor"],
+            "agents": ["cursor", "cursor_cli", "codex"],
         })
 
     def tearDown(self):
@@ -90,13 +90,20 @@ class TestDispatchFile(DispatchTestBase):
 class TestDispatchNotify(DispatchTestBase):
     @patch("plow_whip.dispatch.af.notify")
     def test_notify_sends_message(self, mock_notify):
-        result = _dispatch_notify("qoder", "干活", "P1")
+        result = _dispatch_notify("cursor", "干活", "P1")
         self.assertTrue(result["success"])
         self.assertEqual(result["channel"], "notify")
         mock_notify.assert_called_once()
 
 
 class TestDispatchMain(DispatchTestBase):
+    @patch("plow_whip.dispatch._zellij_available", return_value=False)
+    @patch("plow_whip.dispatch._agent_cli_available")
+    def test_cursor_desktop_does_not_use_cursor_cli_channel(self, mock_cli, _mock_zellij):
+        mock_cli.side_effect = lambda agent: agent == "cursor_cli"
+        self.assertNotIn("cursor_cli", available_channels("cursor"))
+        self.assertIn("cursor_cli", available_channels("cursor_cli"))
+
     @patch("plow_whip.dispatch.available_channels")
     @patch("plow_whip.dispatch._dispatch_file")
     def test_dispatch_falls_back_to_file(self, mock_file, mock_channels):

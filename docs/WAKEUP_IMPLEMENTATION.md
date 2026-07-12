@@ -126,7 +126,7 @@ dispatch(agent="codex", project="JobBrain", message=short_prompt)
 {
   "projects": {
     "JobBrain": {
-      "root": "/Users/niugengtian/Documents/找工作/JobBrain",
+      "root": "/Users/niugengtian/work/找工作/JobBrain",
       "codex": {
         "thread_id": "<codex-thread-id>",
         "host_id": "local",
@@ -218,7 +218,7 @@ Codex 收到唤醒后：
 
 ```bash
 # 安装 plow-whip
-cd ~/Documents/plow-whip
+cd ~/work/plow-whip多AI协作机制/plow-whip
 pip install -e .
 
 # 初始化项目

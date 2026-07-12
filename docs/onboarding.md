@@ -11,7 +11,7 @@ pip install plow-whip
 ### 2. Configure
 
 ```bash
-plow-whip configure --projects-dir ~/my-projects --agents qoder codex cursor
+plow-whip configure --projects-dir ~/my-projects --agents codex cursor cursor_cli codex_cli
 ```
 
 This creates `~/.plow-whip/config.json` with your settings.
@@ -30,7 +30,8 @@ MyProject/
     ├── AGENT_STATE.json        ← State machine state
     ├── AGENT_COMMS.md          ← Message board
     ├── conversations/          ← Per-agent sessions
-    │   ├── qoder/current.md
+    │   ├── cursor/current.md
+    │   ├── cursor_cli/current.md
     │   ├── codex/current.md
     │   └── cursor/current.md
     └── memory/                 ← Multi-layer memory
@@ -57,7 +58,7 @@ plow-whip --project MyProject handoff \
   --phase "Sprint-001"
 
 # Rotate a session that's getting too long
-plow-whip --project MyProject rotate --agent qoder \
+plow-whip --project MyProject rotate --agent cursor \
   --topic "Phase 2 Review" --summary "Architecture accepted"
 ```
 

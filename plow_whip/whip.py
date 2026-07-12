@@ -18,6 +18,7 @@ whip.py — 耕田之鞭：主动驱动 AI agent 干活
 
 import json
 import os
+import hashlib
 import sys
 import time
 from datetime import datetime, timedelta
@@ -101,6 +102,7 @@ def scan_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             continue
 
         state = af.load_state(name)
+        af.ensure_project_path(name, state)
         agent = state.get("current_agent", "unknown")
         status = state.get("status", "unknown")
         stale = _is_stale(state, stale_minutes)
@@ -114,6 +116,7 @@ def scan_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             "staleness_info": _staleness_info(state),
             "next_action": state.get("next_action", ""),
             "task_context": state.get("task_context", {}),
+            "project_path": af.project_dir(name),
             "updated_at": state.get("updated_at", ""),
             "zellij_tab": state.get("zellij_tab"),
         })
@@ -144,6 +147,7 @@ def generate_whip_prompt(result: dict) -> str:
     next_action = result.get("next_action", "查看状态并继续工作")
     ctx = result.get("task_context", {})
     staleness = result.get("staleness_info", "")
+    project_path = result.get("project_path") or ctx.get("project_path") or af.project_dir(project)
 
     lines = [
         f"【鞭策指令】项目: {project}",
@@ -156,14 +160,32 @@ def generate_whip_prompt(result: dict) -> str:
         lines.append(f"任务: Day {ctx['day']} — {ctx.get('topic', '')}")
     if ctx.get("project_dir"):
         lines.append(f"代码: {ctx['project_dir']}")
+    lines.append(f"项目路径: {project_path}")
 
     lines.append(f"请立即执行: {next_action}")
+    lines.append("")
+    lines.append("先读这些文件，不要要求上游粘贴全文:")
+    lines.append(f"  {project_path}/collab/CONVENTIONS.md")
+    lines.append(f"  {project_path}/collab/AGENT_STATE.json")
+    lines.append(f"  {project_path}/collab/AGENT_COMMS.md")
+    lines.append(f"  {project_path}/collab/memory/NEXT_ACTION.md")
     lines.append("")
     lines.append(f"快速恢复命令:")
     lines.append(f"  plow-whip --project {project} status")
     lines.append(f"  plow-whip --project {project} handoff --output '...' --next '...'")
 
     return "\n".join(lines)
+
+
+def _wake_hash(result: dict) -> str:
+    payload = {
+        "project": result.get("project"),
+        "agent": result.get("current_agent"),
+        "phase": result.get("phase"),
+        "next_action": result.get("next_action"),
+        "project_path": result.get("project_path") or result.get("task_context", {}).get("project_path"),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def generate_notification(result: dict) -> str:
@@ -230,7 +252,7 @@ def _print_whip_report(results: list):
 
     for agent, projects in sorted(by_agent.items()):
         emoji = af.AGENT_EMOJI.get(agent, "?")
-        label = af.AGENT_LABEL.get(agent, agent)
+        label = af.get_agent_label(agent)
         print(f"\n{emoji} {label}（{len(projects)} 个项目）")
         print("-" * 40)
 
@@ -275,6 +297,11 @@ def _crack(results: list, force_channel: str = None, force: bool = False, use_br
     for r in stale:
         agent = r["current_agent"]
         project = r["project"]
+        wake_hash = _wake_hash(r)
+        state = af.load_state(project)
+        if not force and state.get("last_wake_hash") == wake_hash:
+            print(f"  [{project}] -> {agent} SKIP: same task already woken")
+            continue
         prompt = generate_whip_prompt(r)
 
         # 显示可用通道
@@ -290,6 +317,11 @@ def _crack(results: list, force_channel: str = None, force: bool = False, use_br
         result = dispatch(agent, project, prompt, force_channel, **dispatch_kwargs)
         status = "OK" if result["success"] else "FAIL"
         print(f"    [{status}] {result['channel']}: {result['detail']}")
+        if result["success"]:
+            state["last_wake_hash"] = wake_hash
+            state["last_woken_at"] = datetime.now().isoformat(timespec="seconds")
+            state["wake_count"] = int(state.get("wake_count", 0)) + 1
+            af.write_state(project, state, touch=False)
         print()
 
 

@@ -14,6 +14,7 @@ dispatch.py — 鞭子本体：将任务投递给指定 AI agent
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -139,13 +140,13 @@ def _agent_cli_available(agent: str) -> bool:
     cli_map = {
         "codex": "codex",
         "codex_cli": "codex",
-        "cursor": "cursor",
-        "qoder": "qoderclicn",
-        "qoder_cli": "qoderclicn",
+        "cursor_cli": "cursor-agent",
     }
     cmd = cli_map.get(agent)
     if not cmd:
         return False
+    if agent == "cursor_cli" and not shutil.which(cmd):
+        cmd = "cursor"
     try:
         subprocess.run(
             ["which", cmd],
@@ -161,13 +162,13 @@ def available_channels(agent: str) -> list:
     channels = []
     
     # CLI 通道（最优，真正自动唤醒）
-    if agent in ("qoder", "qoder_cli") and _agent_cli_available("qoder"):
-        channels.append("qoder_cli")
+    if agent == "cursor_cli" and _agent_cli_available("cursor_cli"):
+        channels.append("cursor_cli")
     if agent in ("codex", "codex_cli") and _agent_cli_available("codex"):
         channels.append("codex_cli")
     
-    # zellij 通道（qoder 专属）
-    if agent in ("qoder", "qoder_cli") and _zellij_available():
+    # zellij 通道（Desktop agent 专属）
+    if agent == "cursor" and _zellij_available():
         channels.append("zellij")
     
     # 通用 CLI 通道
@@ -218,19 +219,12 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
         return {"success": False, "channel": "zellij", "detail": "zellij 未安装"}
 
 
-def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 300) -> dict:
-    """
-    通过 qoderclicn Print 模式直接唤醒 Qoder CLI 执行任务。
-    这是真正的自动唤醒——不需要人点，脚本直接调。
-    """
-    # 获取项目路径
-    projects_dir = af.get_projects_dir()
-    project_path = os.path.join(projects_dir, project)
-    
+def _dispatch_cursor_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 300) -> dict:
+    """通过 Cursor CLI 唤醒 Cursor 执行任务。"""
+    project_path = af.project_dir(project)
     if not os.path.isdir(project_path):
-        return {"success": False, "channel": "qoder_cli", "detail": f"项目路径不存在: {project_path}"}
-    
-    # 构造 prompt 指令
+        return {"success": False, "channel": "cursor_cli", "detail": f"项目路径不存在: {project_path}"}
+
     full_prompt = f"""plow-whip wakeup: {project} 项目被耕田之鞭唤醒。
 
 请执行以下任务:
@@ -239,38 +233,38 @@ def _dispatch_qoder_cli(prompt: str, project: str, max_turns: int = 20, timeout:
 完成后:
 1. 更新 AGENT_STATE.json (handoff)
 2. 写进度到 AGENT_COMMS.md
-3. 清空 ~/.plow-whip/inbox/qoder.json 中对应任务"""
-    
-    cmd = [
-        "qoderclicn",
-        "-p", full_prompt,
-        "-w", project_path,
-        "--yolo",
-        "--max-turns", str(max_turns),
-    ]
-    
+3. 清空 ~/.plow-whip/inbox/cursor_cli.json 中对应任务"""
+
+    if shutil.which("cursor-agent"):
+        cmd = ["cursor-agent", "--print", "--force", "--trust", "--workspace", project_path, full_prompt]
+    elif shutil.which("cursor"):
+        cmd = ["cursor", "-p", full_prompt]
+    else:
+        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 或 cursor 未安装"}
+
     try:
         result = subprocess.run(
             cmd,
+            cwd=project_path,
             capture_output=True, text=True,
-            timeout=timeout,  # 默认 5 分钟
+            timeout=timeout,
         )
         if result.returncode == 0:
             return {
                 "success": True,
-                "channel": "qoder_cli",
-                "detail": f"Qoder CLI 已在 {project_path} 执行任务",
+                "channel": "cursor_cli",
+                "detail": f"Cursor CLI 已在 {project_path} 执行任务",
                 "output": result.stdout[:500] if result.stdout else "",
             }
         return {
             "success": False,
-            "channel": "qoder_cli",
-            "detail": f"qoderclicn 返回 {result.returncode}: {result.stderr[:200]}",
+            "channel": "cursor_cli",
+            "detail": f"cursor 返回 {result.returncode}: {result.stderr[:200]}",
         }
     except subprocess.TimeoutExpired:
-        return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 超时 (5分钟)"}
+        return {"success": False, "channel": "cursor_cli", "detail": "cursor 超时"}
     except FileNotFoundError:
-        return {"success": False, "channel": "qoder_cli", "detail": "qoderclicn 未安装"}
+        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 或 cursor 未安装"}
 
 
 def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 1800) -> dict:
@@ -279,8 +273,7 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout:
     timeout 默认 1800 秒（30 分钟），Sprint 级任务需要足够时间。
     """
     # 获取项目路径
-    projects_dir = af.get_projects_dir()
-    project_path = os.path.join(projects_dir, project)
+    project_path = af.project_dir(project)
     
     if not os.path.isdir(project_path):
         return {"success": False, "channel": "codex_cli", "detail": f"项目路径不存在: {project_path}"}
@@ -342,8 +335,7 @@ def _dispatch_brain(agent: str, prompt: str, project: str) -> dict:
         return {"success": False, "channel": "brain", "detail": "DeepSeek 不可用"}
 
     # 构造带项目上下文的 task
-    projects_dir = af.get_projects_dir()
-    project_path = os.path.join(projects_dir, project)
+    project_path = af.project_dir(project)
     context = f"项目: {project}\n路径: {project_path}\n当前 agent: {agent}"
 
     result = brain.think(prompt, context)
@@ -394,6 +386,7 @@ def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
     # 追加新任务
     tasks.append({
         "project": project,
+        "project_path": af.project_dir(project),
         "prompt": prompt,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "status": "pending",
@@ -420,7 +413,7 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     将任务投递给指定 agent。
 
     参数:
-      agent: 目标 agent 名称（qoder/codex/cursor）
+      agent: 目标 agent 名称（cursor/codex/cursor_cli）
       project: 项目名称
       prompt: 可执行的鞭策指令文本
       force_channel: 强制使用指定通道（zellij/file/notify）
@@ -441,10 +434,10 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     for ch in channels:
         if ch == "brain":
             result = _dispatch_brain(agent, prompt, project)
-        elif ch == "qoder_cli":
+        elif ch == "cursor_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 300)
-            result = _dispatch_qoder_cli(prompt, project, max_turns, timeout)
+            result = _dispatch_cursor_cli(prompt, project, max_turns, timeout)
         elif ch == "codex_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 1800)
