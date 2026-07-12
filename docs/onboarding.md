@@ -19,7 +19,11 @@ This creates `~/.plow-whip/config.json` with your settings.
 ### 3. Initialize Project
 
 ```bash
-plow-whip init --project MyProject
+# Existing project directory
+plow-whip --project MyProject init
+
+# Or create a new project and attach plow-whip in one step
+plow-whip --project MyProject new --owner codex --first-action "clarify requirements"
 ```
 
 This generates:
@@ -48,6 +52,15 @@ MyProject/
 ### 4. Start Working
 
 ```bash
+# First step in every new project/session: verify or repair the plow-whip mechanism
+plow-whip --project MyProject doctor --repair
+
+# Second step: read the smallest wakeup packet before touching broader context
+plow-whip --project MyProject context-pack --agent codex
+
+# Check token budget without reading full memory files
+plow-whip --project MyProject memory-budget
+
 # Check who's turn it is
 plow-whip --project MyProject status
 
@@ -81,6 +94,10 @@ This pushes updated templates to all your projects.
 
 1. `pip install plow-whip`
 2. `plow-whip configure --projects-dir ~/my-projects`
-3. `plow-whip init --project MyProject`
-4. 开始使用：`plow-whip --project MyProject status`
-5. 框架更新后：`plow-whip sync`
+3. 已有项目：`plow-whip --project MyProject init`
+4. 新项目一键接入：`plow-whip --project MyProject new --owner codex --first-action "clarify requirements"`
+5. 进入项目/新会话第一步：`plow-whip --project MyProject doctor --repair`
+6. 第二步读最小上下文：`plow-whip --project MyProject context-pack --agent codex`
+7. 检查三层记忆预算：`plow-whip --project MyProject memory-budget`
+8. 开始使用：`plow-whip --project MyProject status`
+9. 框架更新后：`plow-whip sync`
