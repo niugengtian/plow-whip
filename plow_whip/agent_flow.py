@@ -69,6 +69,9 @@ TRACKED_COLLAB_FILES = [
     "memory/ROADMAP.md",
 ]
 
+GLOBAL_CONVENTIONS_BEGIN = "<!-- plow-whip:global-principles:start -->"
+GLOBAL_CONVENTIONS_END = "<!-- plow-whip:global-principles:end -->"
+
 # Agent mention patterns for activity detection
 AGENT_PATTERNS = ["cursor", "cursor_cli", "qoder", "qoder_cli", "codex", "codex_cli", "@cursor", "@qoder", "@codex", "handoff", "plow-whip"]
 
@@ -190,6 +193,58 @@ def write_rendered(target_path, template_name, project):
             f.write(content)
         return True
     return False
+
+
+def extract_global_conventions_block(content):
+    """Return the marked global conventions block, including markers."""
+    start = content.find(GLOBAL_CONVENTIONS_BEGIN)
+    end = content.find(GLOBAL_CONVENTIONS_END)
+    if start == -1 or end == -1 or end < start:
+        return None
+    end += len(GLOBAL_CONVENTIONS_END)
+    return content[start:end]
+
+
+def write_conventions(target_path, project, sync_global_only=False):
+    """Write CONVENTIONS.md.
+
+    Init writes the full template. Sync updates only the marked global block so
+    project-specific principles outside the block remain local and take priority.
+    Legacy unmarked files are migrated without dropping their existing content.
+    """
+    rendered = render_template("CONVENTIONS.md.tpl", project)
+    if rendered is None:
+        return False
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    if not sync_global_only or not os.path.exists(target_path):
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(rendered)
+        return True
+
+    with open(target_path, encoding="utf-8") as f:
+        current = f.read()
+
+    new_block = extract_global_conventions_block(rendered)
+    old_block = extract_global_conventions_block(current)
+    if not new_block:
+        return False
+
+    if old_block:
+        updated = current.replace(old_block, new_block, 1)
+    else:
+        preserved = current.rstrip()
+        updated = (
+            rendered.rstrip()
+            + "\n\n## 项目原则（从旧 CONVENTIONS.md 保留，优先于全局原则）\n\n"
+            + "> 这是 sync 从未分层的旧文件中保留下来的项目内容。请按项目需要整理；本区内容优先于上方全局原则。\n\n"
+            + preserved
+            + "\n"
+        )
+
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(updated)
+    return updated != current
 
 
 # ── Notifications ──────────────────────────────────────────────────────────────
@@ -904,7 +959,7 @@ def cmd_init(project, args=None):
         write_rendered(os.path.join(mem_dir, out_name), f"memory/{tpl_name}", project)
 
     # Render CONVENTIONS.md
-    write_rendered(os.path.join(pcd, "CONVENTIONS.md"), "CONVENTIONS.md.tpl", project)
+    write_conventions(os.path.join(pcd, "CONVENTIONS.md"), project)
     write_agent_manifest(project)
 
     # Create AGENT_COMMS.md
@@ -972,7 +1027,7 @@ def _ensure_plow_whip_structure(project):
 
     conventions = os.path.join(pcd, "CONVENTIONS.md")
     if not os.path.exists(conventions):
-        write_rendered(conventions, "CONVENTIONS.md.tpl", project)
+        write_conventions(conventions, project)
     if not os.path.exists(os.path.join(pcd, "AGENTS.md")):
         write_agent_manifest(project)
     if not os.path.exists(comms_file(project)):
@@ -1379,8 +1434,8 @@ def cmd_sync():
         updated = []
         # Sync CONVENTIONS.md
         conventions_path = os.path.join(projects_dir, p, "collab", "CONVENTIONS.md")
-        if write_rendered(conventions_path, "CONVENTIONS.md.tpl", p):
-            updated.append("CONVENTIONS.md")
+        if write_conventions(conventions_path, p, sync_global_only=True):
+            updated.append("CONVENTIONS.md(global)")
         # Note: memory files are project-specific, NOT synced
         status = "✅ " + ", ".join(updated) if updated else "⚪ no changes"
         print(f"  {p:20s} {status}")

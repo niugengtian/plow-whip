@@ -1,6 +1,9 @@
 # 多 Agent 协作约定
 
 > **核心原则**：Desktop 决策，CLI 干活，留言板沟通，鞭子驱赶。
+> **优先级**：项目原则 > 全局原则。`sync` 只能更新全局原则块，不能覆盖项目原则。
+
+<!-- plow-whip:global-principles:start -->
 
 ---
 
@@ -379,3 +382,9 @@ plow-whip --project {PROJECT_NAME} watch --interval 30
 ---
 
 *本约定由项目负责人维护，所有 agent 必须遵守。*
+
+<!-- plow-whip:global-principles:end -->
+
+## 项目原则（本项目本地，优先于全局原则）
+
+- 当前无额外项目原则。

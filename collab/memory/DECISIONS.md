@@ -12,6 +12,7 @@
 | D-008 | 2026-07-12 | P-1 零号启动协议：先 `doctor --repair`，再进入项目工作 | Accepted |
 | D-009 | 2026-07-12 | 禁止 Agent 自行开子智能体，除非用户临时明确指定 | Accepted |
 | D-010 | 2026-07-12 | 项目边界原则：禁止越过当前项目目录修改全局配置或其他项目 | Accepted |
+| D-011 | 2026-07-12 | CONVENTIONS 分层：sync 只推全局原则，项目原则优先 | Accepted |
 
 ## D-002: Safe file deletion via by_rm archive
 
@@ -98,3 +99,13 @@
 - **Rule:** 除非用户在当前任务中明确指定路径，否则 Agent 只能读取和修改当前项目根目录内的文件。禁止擅自修改 `~/.plow-whip/config.json`、其他项目目录、其他项目 `collab/`、其他项目 agent 会话文件或全局 agent 阵容。
 - **Reason:** 防止一个项目的 agent 阵容污染另一个项目，避免误删或误改其他项目会话造成三层记忆断层。
 - **Enforcement:** `CONVENTIONS.md` 【P-0.75】；`plow_whip/templates/CONVENTIONS.md.tpl`；发现项目外风险时只报告，不代改；误触项目外文件时必须立即停止、说明并恢复。
+
+
+## D-011: Layered conventions sync
+
+- **Date:** 2026-07-12
+- **Author:** Human + Codex
+- **Status:** ✅ Accepted
+- **Rule:** `CONVENTIONS.md` 分为全局原则和项目原则。`plow-whip sync` 只能更新 `<!-- plow-whip:global-principles:start/end -->` 包住的全局原则块；项目原则保留在标记外，并优先于全局原则。
+- **Reason:** 全局安全/协作原则需要跨项目传播，但每个项目的角色、业务约束、会话规则和本地决策不能被框架同步覆盖。
+- **Enforcement:** `cmd_sync()` 使用 `write_conventions(..., sync_global_only=True)`；未分层旧文件会被非破坏式迁移，旧内容保留为项目原则。

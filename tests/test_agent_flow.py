@@ -293,6 +293,31 @@ class TestSync(PlowWhipTestBase):
         self.assertTrue(os.path.exists(conventions_path))
 
 
+
+    def test_sync_preserves_project_principles(self):
+        cmd_init("TestProject")
+        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
+        with open(conventions_path, "a", encoding="utf-8") as f:
+            f.write("\n## Project Local Rule\n\n- Keep this project-only rule.\n")
+        cmd_sync()
+        with open(conventions_path, encoding="utf-8") as f:
+            conventions = f.read()
+        self.assertIn("plow-whip:global-principles:start", conventions)
+        self.assertIn("Keep this project-only rule", conventions)
+
+    def test_sync_migrates_legacy_conventions_without_overwriting(self):
+        cmd_init("TestProject")
+        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
+        with open(conventions_path, "w", encoding="utf-8") as f:
+            f.write("# Legacy conventions\n\n- Legacy project rule.\n")
+        cmd_sync()
+        with open(conventions_path, encoding="utf-8") as f:
+            conventions = f.read()
+        self.assertIn("plow-whip:global-principles:start", conventions)
+        self.assertIn("Legacy project rule", conventions)
+        self.assertIn("项目原则", conventions)
+
+
 class TestList(PlowWhipTestBase):
     def test_list_shows_projects(self):
         cmd_init("ProjectA")

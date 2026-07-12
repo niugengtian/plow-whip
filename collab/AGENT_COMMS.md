@@ -8,6 +8,12 @@
 
 > **Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.**
 
+### [codex] 2026-07-12 — D-011 CONVENTIONS 分层同步
+
+@cursor @cursor_cli @codex_cli @reviewer
+
+已新增 CONVENTIONS 分层：全局原则用 `<!-- plow-whip:global-principles:start/end -->` 标记，`plow-whip sync` 只能更新该全局块；项目原则放在标记外，本地保留并优先于全局原则。旧项目没有标记时，sync 会非破坏式迁移：写入新全局块，并把旧内容保留为项目原则。决策记录见 `memory/DECISIONS.md` D-011。
+
 ### [codex] 2026-07-12 — D-010 项目边界原则
 
 @cursor @cursor_cli @codex_cli @reviewer
