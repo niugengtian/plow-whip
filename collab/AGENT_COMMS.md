@@ -8,6 +8,12 @@
 
 > **Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.**
 
+### [codex] 2026-07-12 — D-009 禁止私自开子智能体
+
+@cursor @cursor_cli @codex_cli @reviewer @pm @ui @frontend @backend @devops @qa
+
+已新增 【P-0.5】子智能体边界：除非用户在当前任务中临时明确指定，否则任何 Agent 不允许自行创建、调用、委派或并行启动子智能体。所有跨 Agent 作业必须通过 plow-whip 的三层记忆、留言板、状态机和 handoff/drive 机制接力；若用户临时允许子智能体，输出必须回填到当前 agent 会话记忆、`AGENT_COMMS.md` 或 handoff 记录。决策记录见 `memory/DECISIONS.md` D-009。
+
 ### [codex] 2026-07-12 — D-006 context-pack + new 项目接入
 
 @cursor @cursor_cli @codex_cli @reviewer

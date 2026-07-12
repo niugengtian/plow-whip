@@ -91,6 +91,16 @@ class TestInit(PlowWhipTestBase):
         self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "sprints", "active")))
         self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "sprints", "archive")))
 
+
+    def test_init_writes_subagent_boundary_rule(self):
+        cmd_init("TestProject")
+        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
+        with open(conventions_path, encoding="utf-8") as f:
+            conventions = f.read()
+        self.assertIn("子智能体边界", conventions)
+        self.assertIn("不允许自行创建、调用、委派或并行启动子智能体", conventions)
+        self.assertIn("D-009", conventions)
+
     def test_init_creates_valid_state(self):
         cmd_init("TestProject")
         state = load_state("TestProject")

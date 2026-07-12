@@ -10,6 +10,7 @@
 | D-006 | 2026-07-12 | `context-pack` 优先启动 + `new` 一键项目接入 | Accepted |
 | D-007 | 2026-07-12 | `memory-budget` 零正文预算仪表 + 轮转 `Carry Forward` 摘要 | Accepted |
 | D-008 | 2026-07-12 | P-1 零号启动协议：先 `doctor --repair`，再进入项目工作 | Accepted |
+| D-009 | 2026-07-12 | 禁止 Agent 自行开子智能体，除非用户临时明确指定 | Accepted |
 
 ## D-002: Safe file deletion via by_rm archive
 
@@ -76,3 +77,13 @@
 - **Rule:** 任何 Agent 进入项目、打开新会话、接到任务或准备改文件前，第一件事必须运行 `plow-whip --project X doctor --repair`；如果 plow-whip 机制不存在或缺文件，先建立/补齐。第二件事是遵守 `CONVENTIONS.md`，再继续 context-pack 和任务执行。
 - **Reason:** 确保所有项目和新会话都被 plow-whip 接管，避免 Agent 绕开状态机、记忆层、留言板和安全删除规则。
 - **Modules:** `plow_whip/agent_flow.py`, `plow_whip/templates/CONVENTIONS.md.tpl`
+
+
+## D-009: No self-spawned subagents without explicit user instruction
+
+- **Date:** 2026-07-12
+- **Author:** Human
+- **Status:** ✅ Accepted
+- **Rule:** 除非用户在当前任务中临时明确指定，否则任何 Agent 不允许自行创建、调用、委派或并行启动子智能体。所有跨 Agent 作业必须通过 plow-whip 的三层记忆、留言板、状态机和 handoff/drive 机制接力。
+- **Reason:** 防止子智能体绕过 `doctor --repair -> context-pack -> CONVENTIONS.md`，产生 Hot/Warm/Cold 三层记忆断层、token 成本失控和责任边界不清。
+- **Enforcement:** `CONVENTIONS.md` 【P-0.5】；`plow_whip/templates/CONVENTIONS.md.tpl`；如用户临时允许子智能体，输出必须回填到当前 agent 会话记忆、`AGENT_COMMS.md` 或 handoff 记录。

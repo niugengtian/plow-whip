@@ -23,6 +23,27 @@ plow-whip --project plow-whip doctor --repair
 
 ---
 
+## 【P-0.5】子智能体边界 — 禁止 Agent 自行开子智能体
+
+**除非用户在当前任务中临时明确指定，否则任何 Agent 不允许自行创建、调用、委派或并行启动子智能体来完成工作。**
+
+规则：
+
+- 默认执行者只能是 `AGENT_STATE.json`、`AGENTS.md` 和 plow-whip handoff/drive 明确登记的 agent。
+- Agent 不得为了提速、拆分任务、评审、搜索或“多角度分析”自行开 subagent / worker / parallel agent。
+- 如用户临时指定可用子智能体，该子智能体输出必须回填到当前 agent 的会话记忆、`AGENT_COMMS.md` 或 handoff 记录，不能形成独立记忆孤岛。
+- 所有跨 Agent 作业必须通过 plow-whip 的三层记忆、留言板、状态机和 handoff/drive 机制接力。
+
+原因：
+
+- 防止绕过 `doctor --repair -> context-pack -> CONVENTIONS.md` 启动协议。
+- 防止子智能体只持有临时上下文，导致 Hot/Warm/Cold 三层记忆断层。
+- 防止 token 成本失控和责任边界不清。
+
+决策记录：`memory/DECISIONS.md` D-009
+
+---
+
 ## 【P0】文件删除约定（by_rm）— 最高优先级，所有 Agent 首先遵守
 
 **禁止使用 `rm` / `rm -rf` 直接删除文件或目录。**
