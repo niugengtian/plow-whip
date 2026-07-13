@@ -277,6 +277,41 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["task"]["status"], "blocked_waiting_human")
         self.assertEqual(state["task"]["blockers"], ["latest fast-forward blocker"])
 
+    def test_git_delivery_retry_survives_verification_failure_then_delivers(self):
+        self._save_git_delivery_blocker()
+        state = af.load_state("P")
+        state["task"]["verify_commands"] = ["verify-delivery-fix"]
+        af.save_state("P", state)
+        delivery = {
+            "branch": "plow/t-delivery", "target_branch": "main", "commit": "abc",
+            "pushed": True, "merged": True,
+        }
+
+        with patch("plow_whip.agent_flow.subprocess.run", return_value=Mock(
+            returncode=1, stdout="", stderr="still broken",
+        )), patch("plow_whip.tasking.git_flow.finalize_fast_forward") as finalize:
+            af.cmd_task("P", FakeArgs(action="complete", output="first retry", next=None, json=False))
+
+        state = af.load_state("P")
+        self.assertEqual(state["workflow"]["status"], "active")
+        self.assertEqual(state["task"]["status"], "active")
+        self.assertEqual(state["task"]["next_action"], "Fix verification failure: verify-delivery-fix")
+        finalize.assert_not_called()
+
+        with patch("plow_whip.agent_flow.subprocess.run", return_value=Mock(
+            returncode=0, stdout="fixed", stderr="",
+        )), patch(
+            "plow_whip.tasking.git_flow.finalize_fast_forward", return_value=delivery,
+        ) as finalize:
+            af.cmd_task("P", FakeArgs(action="complete", output="fixed and verified", next=None, json=False))
+
+        state = af.load_state("P")
+        self.assertEqual(state["workflow"]["status"], "done")
+        self.assertEqual(state["task"]["status"], "done")
+        self.assertEqual(state["workflow"]["delivery"], delivery)
+        self.assertEqual(len(state["workflow"]["completed"]), 1)
+        finalize.assert_called_once()
+
     def test_plan_confirmation_is_not_released_by_task_complete(self):
         state = af.load_state("P")
         state["workflow"] = {

@@ -2044,6 +2044,8 @@ def cmd_task(project, args):
             task["status"] = "blocked"
             task["blockers"] = getattr(args, "blockers", None) or []
         elif action == "complete":
+            if git_delivery_retry:
+                state["workflow"]["status"] = "active"
             requires_verification = (
                 (state.get("workflow") or {}).get("code_change")
                 and task.get("stage") == "implementation"
@@ -2077,8 +2079,6 @@ def cmd_task(project, args):
     completed_task = task
     goal = state.get("goal") or {}
     workflow_handled = False
-    if action == "complete" and task.get("status") == "done" and git_delivery_retry:
-        state["workflow"]["status"] = "active"
     if action == "complete" and task.get("status") == "done" and (state.get("workflow") or {}).get("status") == "active":
         from . import tasking
 
