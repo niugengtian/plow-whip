@@ -44,11 +44,29 @@ class ProtocolSchedulerTest(unittest.TestCase):
     def test_ensure_adds_new_global_rules_without_replacing_project_rules(self):
         data = af.load_protocol("P")
         data["global_rules"].pop("R007")
+        data["global_rules"]["R005"]["summary"] = "legacy task/handoff-only wording"
+        data["orchestration"].pop("retry_limit")
         data["project_rules"]["P001"] = {"summary": "local", "summary_zh": "本地", "locked": False}
         protocol.save(af.project_dir("P"), data)
         updated = protocol.ensure(af.project_dir("P"), "P", ["codex", "builder"])
         self.assertIn("R007", updated["global_rules"])
+        self.assertIn("submit", updated["global_rules"]["R005"]["summary"])
+        self.assertEqual(updated["orchestration"]["retry_limit"], 3)
         self.assertIn("P001", updated["project_rules"])
+
+    def test_handbook_explains_latest_unattended_contract(self):
+        data = af.load_protocol("P")
+        data["agents"]["goal-planner"] = protocol.normalize_agent("goal-planner", {
+            "roles": ["planner"], "capabilities": ["e2e-plan"], "driver": "codex_cli",
+        })
+        rendered = protocol.render_handbook(data)
+
+        self.assertIn("## 无人值守闭环", rendered)
+        self.assertIn("fast-forward", rendered)
+        self.assertIn("每种 Driver 最大并发 | 5", rendered)
+        self.assertIn("goal-planner` 仅保留兼容", rendered)
+        self.assertIn("simple-tasker` 是内置按需 Agent", rendered)
+        self.assertIn("health.json", rendered)
 
     def test_ensure_migrates_legacy_agent_metadata_to_registry_v4(self):
         data = af.load_protocol("P")
@@ -64,6 +82,15 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(updated["agents"]["builder"]["roles"], ["backend"])
         self.assertEqual(updated["agents"]["builder"]["driver"], "file")
         self.assertEqual(updated["agents"]["codex"]["driver"], "codex_cli")
+
+    def test_future_protocol_schema_is_not_auto_repaired(self):
+        data = af.load_protocol("P")
+        data["schema_version"] = 5
+        protocol.save(af.project_dir("P"), data)
+
+        with self.assertRaisesRegex(ValueError, "unsupported future protocol schema"):
+            protocol.ensure(af.project_dir("P"), "P", ["codex", "builder"])
+        self.assertTrue(protocol.semantic_issues(data)[0].startswith("unsupported protocol schema"))
 
     def test_registry_normalizes_tags_and_rejects_unknown_drivers(self):
         agent = protocol.normalize_agent("api-worker", {
@@ -91,6 +118,23 @@ class ProtocolSchedulerTest(unittest.TestCase):
             self.assertIn(rule["enforcement"], ("block", "require_approval", "verify", "warn", "inform"))
         self.assertNotIn("next_action_file_excerpt", pack)
         self.assertNotIn("rules", pack)
+        self.assertLessEqual(pack["rules_meta"]["startup_payload_chars"], af.START_PACK_MAX_CHARS)
+
+    def test_start_pack_clamps_unbounded_task_fields(self):
+        state = af.load_state("P")
+        state["task"]["title"] = "T" * 10000
+        state["task"]["goal"] = "G" * 10000
+        state["task"]["next_action"] = "N" * 10000
+        state["task"]["acceptance"] = ["A" * 5000 for _ in range(100)]
+        af.save_state("P", state)
+
+        pack = af.build_start_pack("P", "codex")
+
+        self.assertTrue(pack["ready"])
+        self.assertTrue(pack["task"]["title_truncated"])
+        self.assertTrue(pack["task"]["next_action_truncated"])
+        self.assertEqual(len(pack["task"]["acceptance"]), 10)
+        self.assertLessEqual(pack["rules_meta"]["startup_payload_chars"], af.START_PACK_MAX_CHARS)
 
     def test_planning_catalog_size_does_not_grow_with_agent_count(self):
         data = af.load_protocol("P")
@@ -123,6 +167,23 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertNotIn("P-agent", [r["id"] for r in builder_without_tag["important_rules"]])
         self.assertIn("P-agent", [r["id"] for r in builder["important_rules"]])
         self.assertEqual(builder["required_context"][0]["rule_id"], "P-agent")
+
+    def test_rule_compilation_uses_untruncated_task_tags(self):
+        data = af.load_protocol("P")
+        data["project_rules"]["P-late"] = {
+            "summary": "Late tag rule", "priority": "important",
+            "applies_to": {"agents": ["codex"], "task_tags": ["late-tag"]},
+        }
+        protocol.save(af.project_dir("P"), data)
+        protocol.ensure(af.project_dir("P"), "P", ["codex", "builder"])
+        state = af.load_state("P")
+        state["task"]["rule_tags"] = [f"tag-{index}" for index in range(20)] + ["late-tag"]
+        af.save_state("P", state)
+
+        pack = af.build_start_pack("P", "codex")
+
+        self.assertIn("P-late", [rule["id"] for rule in pack["important_rules"]])
+        self.assertNotIn("late-tag", pack["task"]["rule_tags"])
 
     def test_task_command_updates_single_runtime_truth(self):
         af.cmd_task("P", FakeArgs(action="start", task_id="T-9", title="Build", owner="builder", next="Code", decisions=["D-1"], json=False))

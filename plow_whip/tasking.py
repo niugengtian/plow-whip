@@ -42,6 +42,17 @@ WRITE_SIGNALS = (
     "修复", "修改", "实现", "编写", "写一个", "新增", "删除", "重构", "迁移",
     "fix", "implement", "change", "modify", "write", "add", "delete", "refactor", "migrate",
 )
+NEGATED_WRITE_PATTERNS = (
+    re.compile(r"(?:禁止|不要|不得|不允许|无需)\s*(?:修改|修复|写入|编辑|改动|删除)(?:任何)?(?:文件|代码|内容)?", re.I),
+    re.compile(r"\b(?:do not|don't|must not|without)\s+(?:modify|fix|write|edit|change|delete)\b", re.I),
+)
+
+
+def _has_positive_write_signal(text: str) -> bool:
+    remaining = text
+    for pattern in NEGATED_WRITE_PATTERNS:
+        remaining = pattern.sub("", remaining)
+    return any(item in remaining for item in WRITE_SIGNALS)
 
 
 def _human_inbox(project: str, record: dict) -> None:
@@ -80,7 +91,7 @@ def classify_task(text: str, requested_cli: str | None = None) -> dict:
     read_only = (
         bounded
         and any(item in lower for item in READ_ONLY_SIGNALS)
-        and not any(item in lower for item in WRITE_SIGNALS)
+        and not _has_positive_write_signal(lower)
     )
 
     if driver and bounded and not complex_hits:

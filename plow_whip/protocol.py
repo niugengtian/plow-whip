@@ -89,32 +89,32 @@ def normalize_agents(data: dict) -> bool:
 
 GLOBAL_RULES = {
     "R001": {
-        "summary": "Run plow-whip start as the only startup entry.",
-        "summary_zh": "只通过 plow-whip start 进入项目。",
+        "summary": "Every Agent work session enters through plow-whip start; task intake uses submit and scheduled continuation uses whip --once.",
+        "summary_zh": "每个 Agent 工作会话只通过 plow-whip start 进入；任务入口使用 submit，定时续作使用 whip --once。",
         "locked": True,
         "scope": ["startup"],
     },
     "R002": {
-        "summary": "Never use rm; move removals into project-local by_rm.",
-        "summary_zh": "禁止 rm；删除内容移动到项目内 by_rm。",
+        "summary": "Agents never delete project content with rm or unlink; move removals into project-local by_rm. Framework cleanup is limited to its own ephemeral runtime and scheduler artifacts.",
+        "summary_zh": "Agent 禁止用 rm 或 unlink 删除项目内容，删除项移入项目内 by_rm；框架仅可清理自身临时运行文件与定时任务产物。",
         "locked": True,
         "scope": ["filesystem"],
     },
     "R003": {
-        "summary": "Stay inside the project root unless the user explicitly authorizes another path.",
-        "summary_zh": "除非用户明确授权，否则只读写当前项目根目录。",
+        "summary": "Agent file operations stay inside the project root unless the user explicitly authorizes another path; framework-owned config, runtime, and native scheduler files are the only infrastructure exception.",
+        "summary_zh": "除非用户明确授权，Agent 文件操作只能位于当前项目根目录；仅框架自有配置、运行状态与原生定时任务文件属于基础设施例外。",
         "locked": True,
         "scope": ["filesystem"],
     },
     "R004": {
-        "summary": "Do not delegate to subagents unless the user explicitly authorizes it.",
-        "summary_zh": "除非用户明确授权，否则禁止委派子智能体。",
+        "summary": "Do not create or delegate ephemeral nested subagents unless the user explicitly authorizes it; Registry/Router/Task/Handoff routing among registered plow-whip Agents is allowed.",
+        "summary_zh": "除非用户明确授权，禁止创建或委派临时嵌套子智能体；允许通过 Registry、Router、Task、Handoff 在已注册 plow-whip Agent 间接力。",
         "locked": True,
         "scope": ["delegation"],
     },
     "R005": {
-        "summary": "Update work through task or handoff commands; AGENT_STATE.json is runtime truth.",
-        "summary_zh": "通过 task 或 handoff 更新工作；AGENT_STATE.json 是运行状态真源。",
+        "summary": "Update workflow state only through plow-whip state-transition commands, including submit, task, handoff, plan, review, goal, and automation; never edit AGENT_STATE.json directly.",
+        "summary_zh": "工作流状态只能通过 submit、task、handoff、plan、review、goal、automation 等 plow-whip 状态迁移命令更新，禁止直接编辑 AGENT_STATE.json。",
         "locked": False,
         "scope": ["workflow"],
     },
@@ -137,8 +137,8 @@ GLOBAL_RULES = {
         "scope": ["sessions", "automation"],
     },
     "R009": {
-        "summary": "A task with verification commands is done only after every command passes; failures remain active for repair.",
-        "summary_zh": "配置了验收命令的任务只有全部通过才算完成；失败时保持 active 并继续修复。",
+        "summary": "Code-changing tasks require verification commands, every command must pass, and independent review must complete before delivery; failures remain active for repair.",
+        "summary_zh": "代码修改任务必须配置验收命令并全部通过，且须完成独立 Reviewer 验收后才能交付；失败时保持 active 并继续修复。",
         "locked": False,
         "scope": ["workflow", "verification", "automation"],
     },
@@ -263,13 +263,21 @@ def ensure(project_dir: str, project: str, agents: list[str], agent_meta: dict |
     if os.path.exists(path):
         data = load(project_dir)
         changed = False
-        if data.get("schema_version", 1) < 4:
+        schema_version = data.get("schema_version", 1)
+        if not isinstance(schema_version, int):
+            raise ValueError(f"invalid protocol schema version: {schema_version!r}")
+        if schema_version > 4:
+            raise ValueError(f"unsupported future protocol schema v{schema_version}")
+        if schema_version < 4:
             data["schema_version"] = 4
             changed = True
         global_rules = data.setdefault("global_rules", {})
         for rule_id, rule in GLOBAL_RULES.items():
-            if rule_id not in global_rules:
-                global_rules[rule_id] = normalize_rule(rule_id, rule, "global")
+            canonical = normalize_rule(rule_id, rule, "global")
+            current = global_rules.get(rule_id, {})
+            refreshed = {**current, **canonical}
+            if current != refreshed:
+                global_rules[rule_id] = refreshed
                 changed = True
         changed = normalize_rules(data) or changed
         changed = normalize_agents(data) or changed
@@ -317,7 +325,38 @@ def effective_rules(data: dict) -> dict:
     return rules
 
 
+def semantic_issues(data: dict) -> list[str]:
+    """Report repairable schema/default drift without changing canonical files."""
+    issues = []
+    schema_version = data.get("schema_version")
+    if isinstance(schema_version, int) and schema_version < 4:
+        issues.append(f"protocol schema drifted: expected v4, got {schema_version!r}")
+    elif schema_version != 4:
+        issues.append(f"unsupported protocol schema: expected v4, got {schema_version!r}")
+    global_rules = data.get("global_rules", {})
+    drifted = []
+    for rule_id, rule in GLOBAL_RULES.items():
+        canonical = normalize_rule(rule_id, rule, "global")
+        current = global_rules.get(rule_id)
+        if current is None or any(current.get(key) != value for key, value in canonical.items()):
+            drifted.append(rule_id)
+    if drifted:
+        issues.append("inherited global rules drifted: " + ", ".join(drifted))
+    unnormalized_project_rules = [
+        rule_id
+        for rule_id, rule in data.get("project_rules", {}).items()
+        if normalize_rule(rule_id, rule, "project") != rule
+    ]
+    if unnormalized_project_rules:
+        issues.append("project rules need normalization: " + ", ".join(unnormalized_project_rules))
+    missing_defaults = [key for key in DEFAULT_ORCHESTRATION if key not in data.get("orchestration", {})]
+    if missing_defaults:
+        issues.append("protocol defaults missing: orchestration." + ", orchestration.".join(missing_defaults))
+    return issues
+
+
 def render_handbook(data: dict) -> str:
+    orchestration = {**DEFAULT_ORCHESTRATION, **data.get("orchestration", {})}
     lines = [
         "# 多 Agent 协作手册",
         "",
@@ -338,12 +377,70 @@ def render_handbook(data: dict) -> str:
             lines.append(f"- **{rule_id}** `{meta}`：{rule.get('summary_zh', rule.get('summary', ''))}")
     else:
         lines.append("- 当前无额外项目原则。")
+    lines += [
+        "",
+        "## 入口与状态迁移",
+        "",
+        "- 人或外部工具通过 `submit` 投递任务；Agent 每次开始或恢复工作前通过 `start --agent ... --json` 获取有界上下文。",
+        "- 系统定时任务只运行带锁的 `whip --once`；模型仅在存在可恢复的超时 active Task 时由 Worker 调用。",
+        "- Agent 只能使用 `submit`、`task`、`handoff`、`plan`、`review`、`goal`、`automation` 等命令推进状态，框架内部通过 revision 与原子写维护 `AGENT_STATE.json`。",
+        "- 临时嵌套子智能体受 R004 限制；Registry 中已注册 Agent 之间的 Planner、实现、Reviewer、故障接力属于 plow-whip 编排。",
+        "",
+        "## 无人值守闭环",
+        "",
+        "1. 本地分类器将明确任务直接路由；复杂、模糊或无法确认的任务交给可配置 Planner。",
+        "2. Planner 只提交粗粒度里程碑；计划必须由人确认，确认后才恢复无人值守。",
+        "3. 代码任务在独立任务分支执行，完成验收命令后进入独立 Reviewer。",
+        "4. Reviewer 默认使用不同 Driver；资源不足时使用同一 CLI 的不同逻辑 Agent 与全新 Session。",
+        "5. 验收通过后推送任务分支，并仅以 fast-forward 更新目标分支；无法快进时暂停等待人工处理。",
+        "6. 网络或服务故障按 Driver 独立熔断；连续探测成功达到阈值后恢复原任务与会话。",
+        "",
+        "## 编排默认值",
+        "",
+        "| 配置 | 当前值 |",
+        "|---|---|",
+        f"| 默认 Planner | `{orchestration['default_planner']}` |",
+        f"| 默认目标分支 | `{orchestration['default_target_branch']}` |",
+        f"| 系统调度间隔 | {orchestration['scheduler_interval_seconds']} 秒 |",
+        f"| 每种 Driver 最大并发 | {orchestration['max_concurrency_per_driver']} |",
+        f"| 实现失败重试上限 | {orchestration['retry_limit']} |",
+        f"| 熔断恢复连续成功次数 | {orchestration['circuit_recovery_successes']} |",
+        "| 新项目无人值守 | 默认开启 |",
+        "| 计划确认 | 必须由人确认 |",
+        "| Git 交付 | 独立任务分支、独立 Reviewer、fast-forward only |",
+        "",
+        "## 文件真源",
+        "",
+        "| 领域 | 真源 |",
+        "|---|---|",
+        "| 规则、Registry、编排配置 | `collab/AGENT_PROTOCOL.json` |",
+        "| 当前 Task、Workflow、Session 绑定 | `collab/AGENT_STATE.json` |",
+        "| Simple-tasker 完整持久会话 | `collab/memory/sessions/<task>_simple_tasker.jsonl` |",
+        "| CLI 熔断与 Worker 进程登记 | 框架运行目录中的 `health.json`、`workers.json` |",
+        "| 分支与远端交付结果 | Git refs 与远端仓库 |",
+        "| 中文手册、Agent 阵容表、兼容 Markdown | 派生视图，不是真源 |",
+    ]
     lines += ["", "## Agent 阵容", "", "| Agent | Roles | Driver | Capabilities | Assignment |", "|---|---|---|---|---|"]
     for agent, meta in data.get("agents", {}).items():
         if meta.get("enabled", True):
             roles = ", ".join(meta.get("roles") or [meta.get("role", agent)])
             capabilities = ", ".join(meta.get("capabilities") or []) or "—"
             lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {capabilities} | {meta.get('assignment') or '—'} |")
+    if "goal-planner" in data.get("agents", {}):
+        lines += ["", "> `goal-planner` 仅保留兼容；默认规划使用 `orchestration.default_planner`，除非任务明确指定。"]
+    if "simple-tasker" not in data.get("agents", {}):
+        lines += ["", "> `simple-tasker` 是内置按需 Agent：首次命中简单任务路由时自动注册；未注册不表示 Driver 不受支持。"]
+    lines += [
+        "",
+        "> `file` Driver 只负责 inbox/人工接管，不构成端到端无人值守；自动 Reviewer 会选择可执行 CLI Driver。",
+        "",
+        "## 密钥与网络边界",
+        "",
+        "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
+        "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",
+        "- Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。",
+        "- 国内网络、海外出口、TLS 与 Provider 分开探测；全局海外网络故障暂停外部 CLI，单 Provider 故障只暂停对应 Driver。",
+    ]
     lines.append("")
     return "\n".join(lines)
 

@@ -1418,8 +1418,16 @@ def _state_protocol_issues(project):
         data = load_protocol(project)
         agents = proto.enabled_agents(data)
         proto.effective_rules(data)
+        issues.extend(proto.semantic_issues(data))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         return [f"invalid AGENT_PROTOCOL.json: {exc}"]
+    try:
+        with open(handbook_file(project), encoding="utf-8") as f:
+            handbook = f.read()
+        if handbook != proto.render_handbook(data):
+            issues.append("derived handbook drifted from AGENT_PROTOCOL.json")
+    except OSError:
+        issues.append("derived handbook is missing")
     try:
         with open(state_file(project), encoding="utf-8") as f:
             raw = json.load(f)
@@ -1445,8 +1453,23 @@ def _state_protocol_issues(project):
     return issues
 
 
+REPAIRABLE_ISSUE_PREFIXES = (
+    "protocol schema drifted",
+    "inherited global rules drifted",
+    "project rules need normalization",
+    "protocol defaults missing",
+    "derived handbook drifted",
+    "derived handbook is missing",
+    "derived state fields drifted",
+)
+
+
+def _issues_are_repairable(issues):
+    return bool(issues) and all(issue.startswith(REPAIRABLE_ISSUE_PREFIXES) for issue in issues)
+
+
 def build_doctor_report(project):
-    """Check whether a project is wired into plow-whip without reading file bodies."""
+    """Validate project structure plus canonical/derived semantic consistency."""
     required = [
         ("collab/", project_collab_dir(project)),
         ("collab/AGENT_STATE.json", state_file(project)),
@@ -1467,7 +1490,7 @@ def build_doctor_report(project):
     optional_checks = [{"name": name, "path": path, "ok": os.path.exists(path)} for name, path in optional]
     missing = [item for item in checks if not item["ok"]]
     issues = _state_protocol_issues(project) if not missing else []
-    repairable = bool(missing) or bool(issues and all(issue.startswith("derived state fields drifted") for issue in issues))
+    repairable = bool(missing) or _issues_are_repairable(issues)
     return {
         "project": project,
         "project_path": project_dir(project),
@@ -1555,6 +1578,40 @@ def _clamp_text(text, max_chars):
     return text[:max_chars].rstrip() + "\n... [truncated]"
 
 
+START_PACK_MAX_CHARS = 16000
+
+
+def _bounded_start_value(value, depth=0):
+    """Bound arbitrary task metadata while keeping the startup schema intact."""
+    if isinstance(value, str):
+        return _clamp_text(value, 300)
+    if isinstance(value, list):
+        return [_bounded_start_value(item, depth + 1) for item in value[:10]]
+    if isinstance(value, dict):
+        if depth >= 3:
+            return {"summary": "nested startup metadata omitted"}
+        return {
+            str(key): _bounded_start_value(item, depth + 1)
+            for key, item in list(value.items())[:30]
+        }
+    return value
+
+
+def _bounded_start_task(raw_task):
+    task = _bounded_start_value(dict(raw_task or {}))
+    for field, limit in (("title", 500), ("goal", 1200), ("next_action", 2000), ("last_output", 1000)):
+        if field in raw_task:
+            raw_value = (raw_task.get(field) or "").strip()
+            if field == "last_output" and len(raw_value) > limit:
+                task[field] = "... [truncated]\n" + raw_value[-limit:]
+            else:
+                task[field] = _clamp_text(raw_value, limit)
+            if task[field] != (raw_task.get(field) or "").strip():
+                task[f"{field}_truncated"] = True
+    task.pop("verification", None)
+    return task
+
+
 def _latest_targeted_blocks(markdown, agent, limit=3):
     """Return recent AGENT_COMMS blocks aimed at or written by agent."""
     blocks = re.split(r"(?=^### \[)", markdown, flags=re.MULTILINE)
@@ -1586,9 +1643,7 @@ def build_start_pack(project, agent=None):
     """Return the complete, bounded machine startup payload."""
     report = build_doctor_report(project)
     if not report["ok"]:
-        repairable = bool(report["missing"]) or (
-            report.get("issues") and all(issue.startswith("derived state fields drifted") for issue in report["issues"])
-        )
+        repairable = bool(report["missing"]) or _issues_are_repairable(report.get("issues", []))
         return {
             "ready": False,
             "project": project,
@@ -1609,25 +1664,31 @@ def build_start_pack(project, agent=None):
             "action_required": "select_enabled_agent",
             "enabled_agents": agents,
         }
-    task = dict(state.get("task", {}))
+    raw_task = dict(state.get("task", {}))
+    task = _bounded_start_task(raw_task)
     task["owner"] = state.get("assigned_agent") or task.get("owner")
-    task["next_action"] = state.get("next_action", task.get("next_action", ""))
-    task["last_output"] = state.get("last_output", task.get("last_output", ""))
-    task["blockers"] = state.get("blockers", task.get("blockers", []))
-    task.pop("verification", None)
-    if len(task.get("last_output", "")) > 1000:
-        task["last_output"] = task["last_output"][-1000:]
+    raw_next = state.get("next_action", raw_task.get("next_action", ""))
+    task["next_action"] = _clamp_text(raw_next, 2000)
+    if task["next_action"] != (raw_next or "").strip():
+        task["next_action_truncated"] = True
+    raw_output = (state.get("last_output", raw_task.get("last_output", "")) or "").strip()
+    task["last_output"] = (
+        "... [truncated]\n" + raw_output[-1000:]
+        if len(raw_output) > 1000 else raw_output
+    )
+    if task["last_output"] != raw_output:
         task["last_output_truncated"] = True
+    task["blockers"] = _bounded_start_value(state.get("blockers", raw_task.get("blockers", [])))
     messages = [
-        message
+        _clamp_text(message, 1000)
         for message in _latest_targeted_blocks(_read_text(comms_file(project)), agent, limit=6)
         if f"@{agent}" in message and "启动自检确认" not in message
     ][-3:]
-    rule_pack = proto.compiled_rules(data, agent, task)
+    rule_pack = proto.compiled_rules(data, agent, raw_task)
     goal = state.get("goal") or None
     goal_view = None if not goal else {
         "id": goal.get("id"),
-        "text": goal.get("text"),
+        "text": _clamp_text(goal.get("text", ""), 1200),
         "status": goal.get("status"),
         "context_summary": goal.get("context_summary", "")[:1200],
         "progress": f"{len(goal.get('completed', []))}/{goal.get('total', 0)}",
@@ -1651,8 +1712,22 @@ def build_start_pack(project, agent=None):
             "plan_propose": f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'",
         },
     }
-    if "planning" in task.get("rule_tags", []):
+    if "planning" in raw_task.get("rule_tags", []):
         pack["routing_catalog"] = routing.planner_catalog(data)
+    pack["rules_meta"]["startup_payload_max_chars"] = START_PACK_MAX_CHARS
+    payload_chars = len(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    pack["rules_meta"]["startup_payload_chars"] = payload_chars
+    payload_chars = len(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    pack["rules_meta"]["startup_payload_chars"] = payload_chars
+    if payload_chars > START_PACK_MAX_CHARS:
+        return {
+            "ready": False,
+            "project": project,
+            "agent": agent,
+            "action_required": "reduce_startup_payload",
+            "startup_payload_chars": payload_chars,
+            "startup_payload_max_chars": START_PACK_MAX_CHARS,
+        }
     return pack
 
 

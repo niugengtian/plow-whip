@@ -31,6 +31,12 @@ class TaskingTest(unittest.TestCase):
         self.assertEqual(direct["route"], "direct")
         self.assertEqual(direct["driver"], "cursor_cli")
         self.assertFalse(direct["code_change"])
+        self.assertFalse(
+            tasking.classify_task("驱动 cursor cli 只读审查当前改动，禁止修改任何文件")["code_change"]
+        )
+        self.assertFalse(
+            tasking.classify_task("Use cursor cli to review the diff; do not modify files")["code_change"]
+        )
         self.assertTrue(
             tasking.classify_task("驱动 cursor cli 检查代码并修复发现的问题")["code_change"]
         )

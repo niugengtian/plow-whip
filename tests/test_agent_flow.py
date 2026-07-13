@@ -240,6 +240,26 @@ class TestDoctor(PlowWhipTestBase):
         pack = af.build_start_pack("TestProject", "qoder")
         self.assertEqual(pack["action_required"], "fix_canonical_json")
 
+    def test_doctor_detects_and_repairs_protocol_and_handbook_drift(self):
+        cmd_init("TestProject")
+        data = af.load_protocol("TestProject")
+        data["schema_version"] = 3
+        data["global_rules"]["R005"]["summary"] = "stale wording"
+        data["orchestration"].pop("retry_limit")
+        af.proto.save(af.project_dir("TestProject"), data)
+        with open(af.handbook_file("TestProject"), "a", encoding="utf-8") as f:
+            f.write("\nmanual drift\n")
+
+        report = build_doctor_report("TestProject")
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(issue.startswith("protocol schema drifted") for issue in report["issues"]))
+        self.assertTrue(any(issue.startswith("inherited global rules drifted") for issue in report["issues"]))
+        self.assertTrue(any(issue.startswith("protocol defaults missing") for issue in report["issues"]))
+        self.assertTrue(any(issue.startswith("derived handbook drifted") for issue in report["issues"]))
+        af.cmd_repair("TestProject", FakeArgs(json=True))
+        self.assertTrue(build_doctor_report("TestProject")["ok"])
+
 
 class TestStatus(PlowWhipTestBase):
     def test_status_runs(self):
