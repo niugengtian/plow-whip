@@ -18,10 +18,11 @@ brain.py — 廉价大脑：用 DeepSeek API 处理简单任务
 
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime
+
+from . import health
 
 try:
     import httpx
@@ -32,7 +33,7 @@ except ImportError:
 # ── 配置 ─────────────────────────────────────────────────────────────────────
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TIMEOUT = 60  # 秒
 
 # 复杂度分类关键词
@@ -61,28 +62,9 @@ SIMPLE_KEYWORDS = [
 # ── API Key 加载 ──────────────────────────────────────────────────────────────
 
 def _load_api_key() -> str:
-    """
-    加载 DeepSeek API Key，优先级：
-    1. 环境变量 DEEPSEEK_API_KEY
-    2. ~/.config/deepseek/env 文件
-    """
-    # 1. 环境变量
-    key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    if key:
-        return key
-
-    # 2. 配置文件
-    config_path = os.path.expanduser("~/.config/deepseek/env")
-    if os.path.exists(config_path):
-        with open(config_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("export DEEPSEEK_API_KEY="):
-                    # 提取引号内的值
-                    match = re.search(r'["\'](.+?)["\']', line)
-                    if match:
-                        return match.group(1)
-    return ""
+    """Load the first DeepSeek key exclusively from environment variables."""
+    keys = health.deepseek_keys()
+    return keys[0]["secret"] if keys else ""
 
 
 # ── 复杂度分类器 ──────────────────────────────────────────────────────────────
@@ -123,14 +105,18 @@ class Brain:
     """DeepSeek 廉价大脑"""
 
     def __init__(self, api_key: str = None, model: str = None):
-        self.api_key = api_key or _load_api_key()
+        self._keys = health.deepseek_keys()
+        if api_key:
+            self._keys = [{"secret": api_key, "key_ref": "deepseek/test-injected"}]
+        self.api_key = self._keys[0]["secret"] if self._keys else ""
         self.model = model or os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL)
         self._client = None
+        self.last_key_ref = None
 
     @property
     def available(self) -> bool:
         """检查 Brain 是否可用（有 key 且有 httpx）"""
-        return bool(self.api_key) and httpx is not None
+        return bool(self._keys) and httpx is not None
 
     def _get_client(self):
         if self._client is None:
@@ -139,7 +125,7 @@ class Brain:
             self._client = httpx.Client(timeout=DEFAULT_TIMEOUT)
         return self._client
 
-    def think(self, task: str, context: str = "") -> dict:
+    def think(self, task: str, context: str = "", force: bool = False) -> dict:
         """
         让 Brain 思考一个任务。
 
@@ -158,7 +144,7 @@ class Brain:
         # 1. 分类复杂度
         complexity = classify_complexity(task)
 
-        if complexity["level"] == "complex":
+        if complexity["level"] == "complex" and not force:
             return {
                 "routed": "escalate",
                 "complexity": complexity,
@@ -204,20 +190,37 @@ class Brain:
             user_content = f"上下文:\n{context}\n\n任务:\n{task}"
         messages.append({"role": "user", "content": user_content})
 
+        message = self.chat(messages, max_tokens=2000)
+        return message.get("content", "")
+
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_tokens: int = 4000) -> dict:
+        """Call DeepSeek with bounded key rotation and return the assistant message."""
+        if not self.available:
+            raise RuntimeError("DeepSeek API unavailable (missing environment key or httpx)")
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         client = self._get_client()
-        response = client.post(
-            DEEPSEEK_API_URL,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "messages": messages,
-                "temperature": 0.3,  # 低温度，更确定
-                "max_tokens": 2000,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        last_error = None
+        for index, key in enumerate(self._keys):
+            response = client.post(
+                DEEPSEEK_API_URL,
+                headers={"Authorization": f"Bearer {key['secret']}"},
+                json=payload,
+            )
+            if response.status_code in (401, 403, 429) and index < len(self._keys) - 1:
+                last_error = f"HTTP {response.status_code}"
+                continue
+            response.raise_for_status()
+            self.last_key_ref = key["key_ref"]
+            return response.json()["choices"][0]["message"]
+        raise RuntimeError(last_error or "DeepSeek key pool exhausted")
 
     def quick_code(self, description: str, language: str = "python") -> dict:
         """快速生成代码片段"""
@@ -247,7 +250,7 @@ def cmd_brain(args):
     if not brain.available:
         if not brain.api_key:
             print("❌ DeepSeek API Key 未配置")
-            print("   请设置环境变量 DEEPSEEK_API_KEY 或创建 ~/.config/deepseek/env")
+            print("   请设置环境变量 DEEPSEEK_API_KEY（也支持 DEEPSEEK_API_KEY_01 等 Key 池变量）")
         if httpx is None:
             print("❌ httpx 未安装")
             print("   请运行: pip install httpx")
@@ -271,7 +274,7 @@ def cmd_brain(args):
     # 执行
     print("🤔 DeepSeek 思考中...")
     start = time.time()
-    result = brain.think(task, context)
+    result = brain.think(task, context, force=getattr(args, "force", False))
     elapsed = time.time() - start
 
     if result["routed"] == "deepseek":

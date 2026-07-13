@@ -19,14 +19,16 @@
     "last_output": "",
     "blockers": [],
     "decision_ids": [],
-    "cli_sessions": {}
+    "cli_sessions": {},
+    "placeholder": true
   },
   "task_context": {"day": 0, "topic": "", "project_dir": ""},
   "goal": null,
+  "workflow": null,
   "goal_queue": [],
   "goal_history": [],
   "last_wake_hash": "",
-  "automation_enabled": false,
+  "automation_enabled": true,
   "last_dispatch_id": "",
   "last_wake_status": "",
   "last_woken_at": "",

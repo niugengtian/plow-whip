@@ -172,7 +172,7 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             "status": status,
             "task_id": task.get("id", ""),
             "task_status": task_status,
-            "automation_enabled": bool(state.get("automation_enabled", False)),
+            "automation_enabled": bool(state.get("automation_enabled", True)),
             "updated_at": state.get("updated_at", ""),
             "stale": stale,
             "needs_recovery": stale or mismatch,
@@ -211,7 +211,7 @@ def filter_by_agent(results: list, agent: str) -> list:
 
 def filter_active(results: list) -> list:
     """只保留可继续工作的项目；done/blocked 都不可自动派发。"""
-    return [r for r in results if r["status"] not in ("done", "blocked")]
+    return [r for r in results if r["status"] not in ("done", "blocked", "blocked_waiting_human")]
 
 
 # ── 鞭策指令生成 ──────────────────────────────────────────────────────────────
@@ -533,11 +533,12 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             recovery_probes = [r for r in results if r.get("needs_recovery") or force]
             if opt_in_only and not force:
                 recovery_probes = [r for r in recovery_probes if r.get("automation_enabled")]
-            recovery = [
-                _load_recovery_project(r["project"], stale_minutes, r)
-                for r in recovery_probes
-            ] if crack else []
-            dispatches = _crack(recovery, force_channel, force=force, use_brain=use_brain, quiet=True) if crack else []
+            supervision = None
+            if crack:
+                from . import supervisor
+
+                supervision = supervisor.dispatch_projects([item["project"] for item in recovery_probes])
+            dispatches = supervision.get("workers", []) if supervision else []
         payload = {
             "status": "ok",
             "mode": "probe",
@@ -548,6 +549,7 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             "stale_projects": [r["project"] for r in results if r.get("stale")],
             "recovery_projects": [r["project"] for r in recovery_probes],
             "dispatches": dispatches,
+            "supervision": supervision,
             "rotations": rotations,
         }
         try:

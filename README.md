@@ -2,7 +2,7 @@
 
 **让多个 AI Agent 围绕同一个项目状态持续交付，而不是靠聊天记录猜测上下文。**
 
-plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人值守调度器。它把任务、规则、交接、验收和执行证据保存在项目内，通过确定性路由连接 Codex CLI、Cursor CLI、zellij 或文件 inbox。适合同时使用多个 Agent、需要跨会话接力，或希望长任务能在系统定时器下自动续作的开发者和团队。
+plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人值守调度器。它把任务、规则、交接、验收和执行证据保存在项目内，通过确定性路由连接 Codex CLI、Cursor CLI、DeepSeek simple-tasker、zellij 或文件 inbox。适合同时使用多个 Agent、需要跨会话接力，或希望任务能在系统定时器下自动测试、审查并交付到 Git 的开发者和团队。
 
 它解决的不是“如何再调用一个模型”，而是协作过程中的几个具体问题：
 
@@ -10,6 +10,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 - **职责混乱**：Registry 描述长期角色与能力，Router 确定性选人，Driver 负责实际执行。
 - **状态失真**：任务进度、下一步、阻塞和验收结果原子写入一个状态真源。
 - **自动化中断**：系统原生 scheduler 定期运行一次性扫描，只恢复明确启用且需要续作的任务。
+- **Token 成本失控**：状态探针和任务分类完全在本地完成；明确的小任务可交给持久化的 DeepSeek simple-tasker。
 - **结果难追责**：每次投递记录逻辑 owner、实际 executor、Driver、dispatch ID 和精简失败证据。
 
 > 当前版本为 `0.1.0`（Alpha）。plow-whip 是本地编排与状态管理工具，不是托管式 Agent 平台；无人值守能力取决于本机 CLI、认证、权限和系统定时器是否可用。
@@ -32,13 +33,16 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 plow-whip 将“谁负责”与“用什么执行”分开：
 
 ```text
-Goal（人给出的交付目标）
-  └─ Plan（1–7 个粗粒度里程碑）
-      └─ Task（当前唯一原子工作单元）
+Submit（Codex Desktop、CLI 或其他入口）
+  └─ 本地零 Token 分类：direct / simple / needs_planner
+      ├─ direct：明确且有界，直接交给指定 CLI
+      ├─ simple：交给文件持久化的 DeepSeek simple-tasker
+      └─ needs_planner：Codex CLI 规划，必须由人确认里程碑
+          └─ Task（当前唯一原子工作单元）
           ├─ Registry：有哪些长期 Agent，它们的角色、能力和 Driver
           ├─ Router：按角色、能力、优先级、成本和可用性确定性选人
-          ├─ Driver：codex_cli / cursor_cli / zellij / file
-          └─ State：进度、下一步、验收命令、会话与投递生命周期
+          ├─ Driver：codex_cli / cursor_cli / simple_tasker / zellij / file
+          └─ State：进度、下一步、PID、验收、会话、熔断与 Git 生命周期
 ```
 
 两个 canonical 真源和一个启动入口约束整个协作过程：
@@ -46,7 +50,7 @@ Goal（人给出的交付目标）
 | 真源 | 作用 |
 |---|---|
 | `collab/AGENT_PROTOCOL.json` | 机器协议、有效规则与项目 Registry |
-| `collab/AGENT_STATE.json` | 当前 Goal、Task、owner、进度、会话和投递状态 |
+| `collab/AGENT_STATE.json` | 当前 Workflow、Task、owner、进度、会话和投递状态 |
 | `plow-whip ... start --json` | Agent 的唯一启动入口；从真源生成最小执行包 |
 
 Agent 名称代表长期职责身份，不绑定某个模型或客户端。一次执行可以同时区分：
@@ -103,22 +107,20 @@ plow-whip --project MyProject repair --json
 
 `doctor --repair` 是兼容入口。`doctor` 会校验协议、状态、task owner 和派生字段一致性；损坏的 canonical JSON 不会被 repair 静默覆盖。
 
-### 3. 创建任务并唤醒 Agent
+### 3. 提交任务
 
 ```bash
-plow-whip --project MyProject task start \
-  --id T-001 \
-  --title "建立健康检查" \
-  --goal "交付一个可验证的健康检查" \
-  --owner codex \
-  --next "实现健康检查并运行测试" \
-  --acceptance "健康检查返回成功" "测试通过" \
-  --verify "python3 -m unittest"
-
-plow-whip --project MyProject start --agent codex --json
+plow-whip --project MyProject submit "实现健康检查并运行测试"
 ```
 
-`start --json` 返回当前任务、有效规则、定向消息、相关决策 ID 和准确的回写命令。Agent 正常启动无需重读完整 Markdown。
+提交后先进行本地分类，不调用模型。明确指定 `--cli cursor_cli` 的有界任务直接执行；高置信度小任务交给 `simple-tasker`；宽泛或模糊任务交给默认 Planner `codex_cli`。Planner 只能提出计划：
+
+```bash
+plow-whip --project MyProject plan status
+plow-whip --project MyProject plan confirm
+```
+
+计划未确认时状态为 `blocked_waiting_human`，scheduler 不会执行。确认后恢复无人值守。旧的 `task start` 和 `goal` 命令仍保留兼容。
 
 ### 4. 回写进度并完成验收
 
@@ -143,29 +145,30 @@ plow-whip --project MyProject status
 无人值守不是“定时提醒人运行一条命令”。plow-whip 的完整自动续作链路是：
 
 ```text
-goal start（项目明确 opt-in）
-  → 系统 scheduler 每次启动一个有锁的短进程
-  → 只读探针筛选 stale active 任务
-  → Router 选择可执行 Agent 与 Driver
-  → CLI Driver 真实执行并恢复同一会话
-  → 父调度器回写 running / completed / failed
-  → task complete 执行验收命令
-  → 通过后推进下一里程碑，否则保持 active 等待有界重试
+submit（项目默认启用 automation）
+  → 系统 scheduler 每 60 秒启动一个有锁的零 Token 短进程
+  → 只读状态、PID、Session、revision、熔断与并发槽
+  → 后台 Worker 原子绑定一个 Task 与一个 CLI Session
+  → 实现完成后运行 verify_commands
+  → 独立 Reviewer（默认不同 CLI）验收
+  → Reviewer 拒绝则恢复原执行器的原 Session 修复
+  → 验收通过后推送任务分支并 fast-forward 更新目标分支
+  → 远端确认后归档会话并完成 Workflow
 ```
 
 安装跨平台用户级定时任务：
 
 ```bash
 # 先预览，不写系统配置
-plow-whip scheduler install --interval 300 --dry-run
+plow-whip scheduler install --dry-run
 
-# 明确开启无人值守续作
-plow-whip scheduler install --interval 300 --auto-continue
+# 默认每 60 秒自动续作
+plow-whip scheduler install
 
 plow-whip scheduler status
 ```
 
-`goal start` 会为当前项目设置 `automation_enabled=true`。`--auto-continue` 只派发明确 opt-in 的项目；普通 active、blocked 和 done 项目不会因全局定时器而执行。
+新项目默认 `automation_enabled=true`，首次真实用户初始化还会确保本机 scheduler 已安装。可以使用 `automation disable|enable|status` 控制单个项目。`blocked`、`blocked_waiting_human` 和 `done` 永不派发。
 
 | 系统 | 原生机制 | 用户级配置位置 |
 |---|---|---|
@@ -178,10 +181,12 @@ plow-whip scheduler status
 ### 自动化的真实边界
 
 - `codex_cli` 和 `cursor_cli` Driver 可以在 CLI 已安装、已认证且权限充足时真实执行任务。
+- `simple_tasker` 复用现有 DeepSeek Brain API 客户端，但增加项目沙箱工具、Task 级 JSONL 会话、断点恢复和自动上下文压缩；生产 Key 只读取环境变量。
 - `zellij` 依赖可用的本地会话；`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
 - `blocked` 和 `done` 永不自动派发。任务需要外部凭据、人工审批或产品决策时，应明确 block，而不是绕过边界。
-- API Key 池只对认证、额度、限流、连接超时和服务端错误做有界切换；代码失败或任务没有推进不会换 Key。
+- API Key/Profile 池只对认证、额度和限流错误切换。网络或服务异常打开对应 CLI 的独立熔断器，不累计 Task 重试；连续三次无 Token 探测成功后自动恢复。
+- 海外出口探测包含 DNS、国内网络、`curl ifconfig.me`、TLS 和 Provider 端点。全局海外网络中断会熔断全部外部 CLI；单个 Provider 故障只暂停对应 CLI。
 - plow-whip 不代替操作系统权限、密钥管理、沙箱、代码审查或部署审批。
 
 <a id="reliability"></a>
@@ -193,11 +198,15 @@ plow-whip scheduler status
 
 ### 有界恢复，不无限烧 token
 
-默认探针只读状态、时间戳、任务 ID 和状态，不加载 skills、协议正文、任务正文、消息或历史。仅发现 stale 或状态不一致且允许恢复时，才加载该项目的任务上下文。已被实际接管但没有推进的同一动作使用 30 分钟租约，最多自动尝试 3 次；queued/failed 投递使用 1 分钟租约，最多尝试 6 次。达到上限后暂停自动派发。
+默认探针只读状态、时间戳、任务 ID、PID、Session、revision 和熔断状态，不加载 skills、协议正文、任务正文、消息或历史。每个 Task 同时只能有一个 Worker；不同 Task 可并发，每种 CLI 默认最多 5 个。实现失败最多重试 3 次；余额、认证、网络和服务故障与实现失败分开计数。
 
 ### 验收驱动推进
 
-任务有验证命令时，只有全部通过才能完成。Goal 的最后一个里程碑必须显式设置 `final_acceptance=true`，并由未参与实现且可执行的 Agent 独立验收，否则计划会被拒绝。
+任务有验证命令时，只有全部通过才能进入 Reviewer。代码 Workflow 的最后一步必须独立验收，默认选择不同 Driver；只有资源不足时才允许同一 CLI 的不同逻辑 Agent 与全新 Session。Reviewer 拒绝不会自己改代码，而是恢复原执行 Session。
+
+### Git 交付原子性
+
+代码任务在执行前从目标分支创建 `plow/<task-id>` 独立分支。Reviewer 通过后由 plow-whip 提交未提交改动、推送任务分支，并使用远端 fast-forward 更新目标分支。目标分支已经移动且无法快进时进入 `blocked_waiting_human`；系统绝不自动 rebase。
 
 ### 可追踪的投递生命周期
 
@@ -248,9 +257,21 @@ plow-whip --project MyProject agent set backend-backup \
   --priority 70
 ```
 
-Router 根据 `roles + capabilities + enabled + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。可执行 Driver 是封闭集合：`codex_cli`、`cursor_cli`、`zellij`、`file`。旧 schema v3 配置可迁移为 v4，补齐稳定角色标签和执行字段。
+Router 根据 `roles + capabilities + enabled + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。可执行 Driver 是封闭集合：`codex_cli`、`cursor_cli`、`simple_tasker`、`zellij`、`file`。旧 schema v3 配置可迁移为 v4，补齐稳定角色标签和执行字段。
 
-### Goal 与粗粒度里程碑
+### Task Planner 与粗粒度里程碑
+
+`submit` 的本地分类器只把高置信度任务直接派发。无法确认或范围过宽时，默认由 `codex_cli` 规划；项目可在 `AGENT_PROTOCOL.json.orchestration.default_planner` 指定其他 CLI。Planner 使用：
+
+```bash
+plow-whip --project MyProject plan propose \
+  --context-summary "后续接力所需的压缩项目上下文" \
+  --plan-json '[{"title":"实现并测试登录","role":"backend","acceptance":["测试通过"]},{"title":"最终集成验收","role":"reviewer","acceptance":["全量验收通过"],"final_acceptance":true}]'
+```
+
+提交计划只会触发人类确认门，不会立刻执行。`goal-planner` 不再参与默认路由。
+
+### 兼容 Goal
 
 人可以只提交目标：
 
@@ -258,7 +279,7 @@ Router 根据 `roles + capabilities + enabled + priority + cost_tier + driver av
 plow-whip --project MyProject goal start "交付可上线的登录功能"
 ```
 
-系统选择具备 `planner` 角色且 Driver 可执行的 Agent。Planner 第一次理解项目后提交 1–7 个粗粒度里程碑：
+旧 `goal` 工作流仍可使用，但其默认 Planner 同样遵循 `orchestration.default_planner`，不会再按 `goal-planner` 的旧优先级选人：
 
 ```bash
 plow-whip --project MyProject goal plan \
@@ -316,13 +337,25 @@ plow-whip cli-auth mode codex_cli pool
 
 Pool 模式先用 active profile，再按配置顺序尝试其他可用 profile。空池明确失败，不回退到其他账号；模型随 profile 切换。
 
+DeepSeek 只读取环境变量，可配置一个或多个 Key：
+
+```bash
+export DEEPSEEK_API_KEY='...'
+export DEEPSEEK_API_KEY_02='...'
+export DEEPSEEK_MODEL='deepseek-v4-flash'  # 可选
+plow-whip health status
+```
+
+任务和日志只记录类似 `deepseek/01/****A7F2/fp-82c91a` 的脱敏标识，不保存真实 Key，也不读取 `.env` 或 `~/.config/deepseek/env`。
+
 ### CLI 会话生命周期
 
-每个任务可分别绑定一个 `cursor_cli` 和一个 `codex_cli` 会话。会话 ID 由 CLI 生成，plow-whip 只记录、恢复和归档：
+每个任务可分别绑定一个 `cursor_cli`、`codex_cli` 和 `simple_tasker` 会话。CLI 会话 ID 由各 CLI 生成；simple-tasker 使用本地文件 Session：
 
 - Cursor CLI 首次执行从 stream JSON 的 `system/init.session_id` 取 ID，后续使用 `--resume=<session_id>`。
 - Codex CLI 首次执行从 `exec --json` 捕获 session/thread ID，后续使用 `exec resume <session_id>`。
 - 同一任务、同一 CLI 若返回不同 ID，立即失败，避免产生第二条上下文链。
+- `collab/memory/sessions/<task>_simple_tasker.jsonl` 追加消息、工具调用、命令结果和检查点；上下文压缩不删除完整历史。
 - `task complete` 将任务的 CLI 会话标记为 `archived`；下一任务从空会话开始。
 
 <a id="project-data"></a>
@@ -335,6 +368,7 @@ collab/
 ├── AGENT_STATE.json      # 当前任务与运行状态；状态真源
 ├── AGENTS.md             # 从协议派生的人类阵容表
 ├── AGENT_COMMS.md        # 近期定向消息，自动检查轮转
+├── human_inbox.jsonl     # 计划确认与 FF 阻塞等可恢复的人类决策入口
 ├── CONVENTIONS.agent.md  # 旧工具兼容指针
 ├── CONVENTIONS.md        # 旧工具兼容指针
 ├── conversations/        # Agent 会话与归档
@@ -383,6 +417,11 @@ collab/
 
 | 命令 | 用途 |
 |---|---|
+| `submit` | 本地零 Token 分类并提交 direct/simple/planner Workflow |
+| `plan propose` | Planner 提交 1–7 个里程碑，随后进入人工确认门 |
+| `plan confirm` / `reject` / `status` | 确认、退回或查看非 Goal 计划 |
+| `review reject` | 独立 Reviewer 拒绝并恢复原执行器 Session 修复 |
+| `automation enable` / `disable` / `status` | 控制单个项目的无人值守开关 |
 | `task start` | 创建当前原子任务及其验收、验证和规则标签 |
 | `task progress` | 原子回写产出、下一步，并可更新验收与验证命令 |
 | `task block` | 写入阻塞原因并暂停自动派发 |
@@ -397,13 +436,15 @@ collab/
 | 命令 | 用途 |
 |---|---|
 | `whip` | 扫描项目；`--once` 为有锁单次运行，`--crack` 才实际派发 |
-| `scheduler install` | 安装用户级定时任务；`--auto-continue` 开启 opt-in 自动续作 |
+| `scheduler install` | 安装默认 60 秒、自动续作的用户级定时任务 |
 | `scheduler status` | 查看定时任务状态 |
 | `scheduler run` | 立即执行一次 scheduler 工作负载 |
 | `scheduler start` / `stop` | 启动或停止原生定时任务 |
 | `scheduler logs` | 查看 scheduler 日志 |
 | `scheduler doctor` / `repair` | 检查或修复 scheduler 配置 |
 | `scheduler uninstall` | 卸载用户级定时任务 |
+| `health status` | 查看各 CLI 独立熔断状态和脱敏 DeepSeek Key 槽位 |
+| `health probe` | 执行 DNS、国内/海外出口、TLS、Provider 与 CLI 可用性探测 |
 | `inbox list` | 查看某 Agent 的文件投递 |
 | `inbox update` | 按 dispatch ID 更新 queued/accepted/running/completed/failed |
 
@@ -428,7 +469,7 @@ collab/
 | `cli-auth add` / `remove` | 添加或删除仅引用环境变量的 Key profile |
 | `cli-auth select` | 选择 active profile |
 | `cli-auth failover` | 开关有界认证故障切换 |
-| `brain` | 使用可选 DeepSeek Brain 处理简单任务 |
+| `brain` | `simple-tasker` DeepSeek 客户端的兼容单次入口 |
 
 常用参数的精确真源是当前 CLI：
 
@@ -459,7 +500,7 @@ python3 -m plow_whip.agent_flow --help
 1. 以 `AGENT_PROTOCOL.json` 和 `AGENT_STATE.json` 为 canonical 数据，不增加并行真源。
 2. 新命令或参数必须同步更新 CLI 帮助、测试和本 README 的命令索引。
 3. 调度改动必须保持 macOS、Linux、Windows 原生支持，以及有锁的一次性执行模型。
-4. 无人值守相关改动需要覆盖 opt-in、blocked/done 不派发、租约、重试上限和验收失败路径。
+4. 无人值守相关改动需要覆盖项目开关、人工阻塞/done 不派发、Task 原子性、熔断、重试上限和验收失败路径。
 5. PR 请说明行为变化、验证命令和兼容性影响；Bug 报告请包含平台、Python 版本、复现步骤和脱敏日志。
 
 更多实现背景见 [架构说明](docs/architecture.md)、[核心概念](docs/concepts.md) 和 [接入指南](docs/onboarding.md)。若这些文档与 CLI 或 canonical schema 冲突，以代码、测试和机器协议为准。

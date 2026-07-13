@@ -60,10 +60,24 @@ def build_drive_prompt(
         "",
         "完成后:",
         f"  1. plow-whip --project {project} task progress --output '...' --next '...'",
+        f"     代码任务还要通过 task progress --verify '<command>' 写入真实验收命令。",
         f"  2. 当前里程碑完成时运行 plow-whip --project {project} task complete --output '...'（系统验收并自动接力）",
-        f"  3. 若当前任务是 PLAN，运行 start --json 返回的 goal_plan 命令建立 1-7 个里程碑",
+        f"  3. 若当前任务是 PLAN：普通 Task 使用 start --json 返回的 plan_propose；旧 Goal 仅使用 goal_plan",
         "  投递 lifecycle 由父调度器回写，不要在子 Agent 内重复更新 inbox。",
     ]
+    try:
+        current_task = af.load_state(project).get("task", {})
+    except (OSError, SystemExit):
+        current_task = {}
+    if current_task.get("stage") == "review":
+        lines += [
+            "",
+            "独立 Reviewer 规则:",
+            "  - 只读审查，不要修改实现文件。",
+            f"  - 验收通过：plow-whip --project {project} task complete --output 'approved: ...'",
+            f"  - 验收拒绝：plow-whip --project {project} review reject --reason '...'",
+            "  - 拒绝后系统会恢复原执行器的原 Session 修复。",
+        ]
     return "\n".join(lines)
 
 

@@ -70,7 +70,7 @@ from .io_utils import atomic_write_json, atomic_write_text, file_lock
 # Agent mention patterns for activity detection
 AGENT_PATTERNS = ["cursor", "cursor_cli", "qoder", "qoder_cli", "codex", "codex_cli", "@cursor", "@qoder", "@codex", "handoff", "plow-whip"]
 
-DEFAULT_AGENTS = ["codex", "cursor", "cursor_cli", "codex_cli"]
+DEFAULT_AGENTS = ["codex", "cursor", "cursor_cli", "codex_cli", "simple-tasker"]
 AGENT_LABEL = {
     "cursor": "Cursor Desktop (替代 Qoder CN Desktop)",
     "cursor_cli": "Cursor CLI (替代 Qoder CLI)",
@@ -78,6 +78,7 @@ AGENT_LABEL = {
     "qoder_cli": "Qoder CLI (停用)",
     "codex": "Codex Desktop (PM+架构师)",
     "codex_cli": "Codex CLI (Code Owner)",
+    "simple-tasker": "Simple Tasker (DeepSeek V4 Flash)",
 }
 AGENT_EMOJI = {
     "cursor": "🟣",
@@ -86,6 +87,7 @@ AGENT_EMOJI = {
     "qoder_cli": "🔷",
     "codex": "🟢",
     "codex_cli": "🟩",
+    "simple-tasker": "⚡",
 }
 
 
@@ -289,7 +291,7 @@ def default_state(project):
         "assigned_agent": first_agent,
         "blockers": [],
         "last_wake_hash": "",
-        "automation_enabled": False,
+        "automation_enabled": True,
         "last_dispatch_id": "",
         "last_wake_status": "",
         "last_woken_at": "",
@@ -312,8 +314,10 @@ def default_state(project):
             "blockers": [],
             "decision_ids": [],
             "cli_sessions": {},
+            "placeholder": True,
         },
         "goal": None,
+        "workflow": None,
         "goal_queue": [],
         "goal_history": [],
         "updated_at": "",
@@ -346,6 +350,8 @@ def load_state(project):
     task.setdefault("blockers", state.get("blockers", []))
     task.setdefault("decision_ids", [])
     task.setdefault("cli_sessions", {})
+    if task.get("id") == "T-001" and task.get("title") == "Project initialization":
+        task.setdefault("placeholder", True)
     goal = state.get("goal") or {}
     if goal.get("id"):
         for milestone in [task, *goal.get("queue", [])]:
@@ -889,7 +895,7 @@ def format_rotation_health(report):
         "Enforce:",
         f"- plow-whip --project {report['project']} memory-rotate",
         f"- plow-whip --project {report['project']} memory-budget --enforce-rotate",
-        f"- plow-whip scheduler install --interval 300",
+        f"- plow-whip scheduler install --interval 60",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1306,6 +1312,24 @@ def cmd_init(project, args=None):
     save_state(project, default_state(project))
     append_comms(project, f"项目初始化：当前路径为 `{project_dir(project)}`。")
 
+    # A real user installation is unattended by default. Test/embedded config
+    # directories do not mutate the host scheduler.
+    default_config_dir = os.path.join(os.path.expanduser("~"), ".plow-whip")
+    configured_dir = os.environ.get("PLOW_WHIP_CONFIG_DIR")
+    if os.path.abspath(CONFIG_DIR) in {
+        os.path.abspath(default_config_dir),
+        os.path.abspath(configured_dir) if configured_dir else "",
+    }:
+        try:
+            from . import scheduler
+
+            if not scheduler.status(CONFIG_DIR).get("installed"):
+                scheduler.install(CONFIG_DIR, interval=60, auto_crack=True)
+        except (OSError, ValueError):
+            # State remains automation-enabled; scheduler doctor/repair reports
+            # a host-specific installation failure without corrupting init.
+            pass
+
     print(f"\n🆕 Project '{project}' initialized!")
     print(f"   collab/: {pcd}")
     print(f"   memory/: {mem_dir}")
@@ -1333,6 +1357,7 @@ def cmd_new(project, args):
             task["title"] = first_action
             task["next_action"] = first_action
             task["status"] = "active"
+            task["placeholder"] = False
         save_state(project, state)
         append_comms(project, f"新项目一键接入：owner=`{state['current_agent']}`；next=`{state['next_action']}`。")
 
@@ -1623,6 +1648,7 @@ def build_start_pack(project, agent=None):
             "complete": f"plow-whip --project {project} task complete --output '...'",
             "handoff": f"plow-whip --project {project} handoff --to <agent> --output '...' --next '...'",
             "goal_plan": f"plow-whip --project {project} goal plan --context-summary '...' --plan-json '[{{...}}]'",
+            "plan_propose": f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'",
         },
     }
     if "planning" in task.get("rule_tags", []):
@@ -1632,31 +1658,99 @@ def build_start_pack(project, agent=None):
 
 def cmd_start(project, args):
     payload = build_start_pack(project, getattr(args, "agent", None))
-    if getattr(args, "json", False):
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def cmd_submit(project, args):
+    from . import tasking
+
+    payload = tasking.submit(
+        project,
+        args.text,
+        requested_cli=getattr(args, "cli", None),
+        planner=getattr(args, "planner", None),
+        target_branch=getattr(args, "target_branch", None),
+        source=getattr(args, "source", "current_session"),
+        replace=getattr(args, "replace", False),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def cmd_plan(project, args):
+    from . import tasking
+
+    if args.action == "propose":
+        payload = tasking.propose_plan(project, args.context_summary, json.loads(args.plan_json))
+    elif args.action == "confirm":
+        payload = tasking.confirm_plan(project)
+    elif args.action == "reject":
+        payload = tasking.reject_plan(project, args.reason)
     else:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        state = load_state(project)
+        payload = {"project": project, "workflow": state.get("workflow"), "task": state.get("task")}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def run_task_verification(project, commands):
+def cmd_review(project, args):
+    from . import tasking
+
+    payload = tasking.reject_review(project, args.reason)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def cmd_automation(project, args):
+    state = load_state(project)
+    if args.action in ("enable", "disable"):
+        state["automation_enabled"] = args.action == "enable"
+        save_state(project, state)
+    from . import scheduler
+
+    print(json.dumps({
+        "project": project, "automation_enabled": state.get("automation_enabled", True),
+        "scheduler": scheduler.status(CONFIG_DIR),
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_health(args):
+    from . import health
+
+    if args.action == "probe":
+        drivers = [args.driver] if args.driver else list(health.DRIVERS)
+        payload = {driver: health.probe_driver(driver) for driver in drivers}
+    else:
+        payload = health.load(CONFIG_DIR)
+        payload["deepseek_keys"] = health.safe_key_refs()
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def run_task_verification(project, commands, task=None):
     """Run the task's explicit acceptance commands and stop at first failure."""
     results = []
     for command in commands:
-        completed = subprocess.run(
-            command,
-            cwd=project_dir(project),
-            shell=True,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        result = {
-            "command": command,
-            "returncode": completed.returncode,
-            "output": (completed.stdout + completed.stderr).strip()[-2000:],
-        }
+        if (task or {}).get("verification_policy") == "sandboxed":
+            from .simple_tasker import SimpleTasker
+
+            try:
+                sandboxed = SimpleTasker(project_dir(project), (task or {}).get("id", "verification")).run_command(command)
+            except ValueError as exc:
+                sandboxed = {"returncode": 126, "output": f"sandbox rejected verification command: {exc}"}
+            result = {"command": command, "returncode": sandboxed["returncode"], "output": sandboxed["output"][-2000:]}
+        else:
+            completed = subprocess.run(
+                command,
+                cwd=project_dir(project),
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            result = {
+                "command": command,
+                "returncode": completed.returncode,
+                "output": (completed.stdout + completed.stderr).strip()[-2000:],
+            }
         results.append(result)
-        if completed.returncode:
+        if result["returncode"]:
             break
     return results
 
@@ -1698,16 +1792,9 @@ def _planning_task(goal, owner):
 
 
 def _planner_owner(data, preferred=None):
-    if preferred:
-        if preferred not in proto.enabled_agents(data):
-            raise ValueError(f"unknown planner owner: {preferred}")
-        return preferred
-    owner = routing.select_agent(
-        data, role="planner", driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
-    )
-    if not owner:
-        raise ValueError("no enabled planner agent has an executable driver")
-    return owner
+    from .tasking import planner_owner
+
+    return planner_owner(data, preferred)
 
 
 def _activate_goal(state, data, goal):
@@ -1847,7 +1934,15 @@ def cmd_task(project, args):
             task["status"] = "blocked"
             task["blockers"] = getattr(args, "blockers", None) or []
         elif action == "complete":
-            verification = run_task_verification(project, task.get("verify_commands", []))
+            requires_verification = (
+                (state.get("workflow") or {}).get("code_change")
+                and task.get("stage") == "implementation"
+                and not task.get("verify_commands")
+            )
+            verification = ([{
+                "command": "<verify_commands required>", "returncode": 2,
+                "output": "Code-changing tasks must declare and pass at least one verification command.",
+            }] if requires_verification else run_task_verification(project, task.get("verify_commands", []), task))
             failed = next((item for item in verification if item["returncode"]), None)
             task["verification"] = verification
             if failed:
@@ -1871,7 +1966,16 @@ def cmd_task(project, args):
             task["status"] = "active"
     completed_task = task
     goal = state.get("goal") or {}
-    if action == "complete" and task.get("status") == "done" and goal.get("status") == "active":
+    workflow_handled = False
+    if action == "complete" and task.get("status") == "done" and (state.get("workflow") or {}).get("status") == "active":
+        from . import tasking
+
+        _archive_task_sessions(project, task)
+        advanced = tasking.advance_after_completion(project, state, task)
+        if advanced:
+            task, action = advanced
+            workflow_handled = True
+    if not workflow_handled and action == "complete" and task.get("status") == "done" and goal.get("status") == "active":
         goal.setdefault("completed", []).append({
             "id": task.get("id"), "title": task.get("title"), "owner": task.get("owner"),
             "output": task.get("last_output", "")[-500:],
@@ -1892,7 +1996,7 @@ def cmd_task(project, args):
                 state["goal"] = goal
         if action != "advance_goal":
             state["goal"] = goal
-    elif action == "complete" and task.get("status") == "done" and state.get("goal_queue"):
+    elif not workflow_handled and action == "complete" and task.get("status") == "done" and state.get("goal_queue"):
         next_goal = state["goal_queue"].pop(0)
         _activate_goal(state, load_protocol(project), next_goal)
         task = state["task"]
@@ -2224,7 +2328,7 @@ def main():
     agent_set.add_argument("--role", help="Role label")
     agent_set.add_argument("--roles", nargs="+", help="Stable routing role tags")
     agent_set.add_argument("--capabilities", nargs="*", help="Capability tags")
-    agent_set.add_argument("--driver", choices=["codex_cli", "cursor_cli", "zellij", "file"], help="Execution driver")
+    agent_set.add_argument("--driver", choices=["codex_cli", "cursor_cli", "simple_tasker", "zellij", "file"], help="Execution driver")
     agent_set.add_argument("--priority", type=int, help="Routing priority")
     agent_set.add_argument("--cost-tier", choices=["low", "medium", "high"], help="Token/cost tier")
     agent_set.add_argument("--assignment", help="Current assignment")
@@ -2244,6 +2348,34 @@ def main():
     start_parser = sub.add_parser("start", help="Return the complete minimal startup payload")
     start_parser.add_argument("--agent", help="Target agent")
     start_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    submit_parser = sub.add_parser("submit", help="Submit and locally route a new unattended task")
+    submit_parser.add_argument("text", help="Task description")
+    submit_parser.add_argument("--cli", choices=["codex_cli", "cursor_cli", "simple_tasker", "codex", "cursor", "deepseek"])
+    submit_parser.add_argument("--planner", help="Configured planner agent (default codex_cli)")
+    submit_parser.add_argument("--target-branch", help="Fast-forward delivery target (default main)")
+    submit_parser.add_argument("--source", default="current_session", help="Interaction source identifier")
+    submit_parser.add_argument("--replace", action="store_true", help="Deliberately replace current active work")
+
+    plan_parser = sub.add_parser("plan", help="Propose or confirm a non-goal milestone workflow")
+    plan_sub = plan_parser.add_subparsers(dest="action", required=True)
+    plan_propose = plan_sub.add_parser("propose")
+    plan_propose.add_argument("--context-summary", required=True)
+    plan_propose.add_argument("--plan-json", required=True)
+    plan_sub.add_parser("confirm")
+    plan_reject = plan_sub.add_parser("reject")
+    plan_reject.add_argument("--reason", required=True)
+    plan_sub.add_parser("status")
+
+    review_parser = sub.add_parser("review", help="Independent reviewer lifecycle")
+    review_sub = review_parser.add_subparsers(dest="action", required=True)
+    review_reject = review_sub.add_parser("reject")
+    review_reject.add_argument("--reason", required=True)
+
+    automation_parser = sub.add_parser("automation", help="Enable, disable, or inspect unattended execution")
+    automation_sub = automation_parser.add_subparsers(dest="action", required=True)
+    for automation_action in ("enable", "disable", "status"):
+        automation_sub.add_parser(automation_action)
 
     task_parser = sub.add_parser("task", help="Atomically update the current task")
     task_sub = task_parser.add_subparsers(dest="action", required=True)
@@ -2367,27 +2499,29 @@ def main():
     whip_parser.add_argument("--json", action="store_true", help="Output as JSON")
     whip_parser.add_argument("--crack", action="store_true", help="CRACK! Actually dispatch tasks to agents")
     whip_parser.add_argument("--auto-crack", action="store_true", help="Deprecated: run one crack pass; use scheduler for repetition")
-    whip_parser.add_argument("--channel", choices=["zellij", "file", "notify"], help="Force specific dispatch channel")
+    whip_parser.add_argument("--channel", choices=["codex_cli", "cursor_cli", "simple_tasker", "zellij", "file", "notify"], help="Force specific dispatch channel")
     whip_parser.add_argument("--daemon", action="store_true", help="Deprecated: run one scan; use scheduler for repetition")
     whip_parser.add_argument("--interval", type=int, default=300, help="Deprecated compatibility option")
     whip_parser.add_argument("--force", action="store_true", help="Force dispatch even if project is not stale")
     whip_parser.add_argument("--auto-rotate", action="store_true", help="Auto-rotate sessions that exceed size thresholds")
     whip_parser.add_argument("--brain", action="store_true", help="Use DeepSeek brain for simple tasks before dispatching")
     whip_parser.add_argument("--once", action="store_true", help="Run one locked scheduler-safe pass and exit")
-    whip_parser.add_argument("--opt-in-only", action="store_true", help="Dispatch only projects that enabled goal automation")
+    whip_parser.add_argument("--opt-in-only", action="store_true", help="Dispatch only projects with automation enabled")
 
     scheduler_parser = sub.add_parser("scheduler", help="Manage native per-user scheduling")
     scheduler_sub = scheduler_parser.add_subparsers(dest="action", required=True)
     scheduler_install = scheduler_sub.add_parser("install")
-    scheduler_install.add_argument("--interval", type=positive_int, default=300)
+    scheduler_install.add_argument("--interval", type=positive_int, default=60)
     scheduler_install.add_argument("--auto-crack", action="store_true")
     scheduler_install.add_argument("--auto-continue", action="store_true", help="Automatically resume stale active tasks")
     scheduler_install.add_argument("--dry-run", action="store_true")
+    scheduler_install.set_defaults(auto_continue=True)
     scheduler_status = scheduler_sub.add_parser("status")
     scheduler_run = scheduler_sub.add_parser("run")
     scheduler_run.add_argument("--auto-crack", action="store_true")
     scheduler_run.add_argument("--auto-continue", action="store_true", help="Automatically resume stale active tasks")
-    scheduler_run.add_argument("--stale-minutes", type=int, default=60)
+    scheduler_run.add_argument("--stale-minutes", type=int, default=1)
+    scheduler_run.set_defaults(auto_continue=True)
     scheduler_sub.add_parser("start")
     scheduler_sub.add_parser("stop")
     scheduler_logs = scheduler_sub.add_parser("logs")
@@ -2395,6 +2529,12 @@ def main():
     scheduler_sub.add_parser("doctor")
     scheduler_sub.add_parser("repair")
     scheduler_sub.add_parser("uninstall")
+
+    health_parser = sub.add_parser("health", help="Inspect zero-token CLI/network circuit health")
+    health_sub = health_parser.add_subparsers(dest="action", required=True)
+    health_sub.add_parser("status")
+    health_probe = health_sub.add_parser("probe")
+    health_probe.add_argument("--driver", choices=["codex_cli", "cursor_cli", "simple_tasker"])
 
     inbox_parser = sub.add_parser("inbox", help="Inspect or update dispatch lifecycle")
     inbox_sub = inbox_parser.add_subparsers(dest="action", required=True)
@@ -2476,6 +2616,9 @@ def main():
     if args.command == "scheduler":
         cmd_scheduler(args)
         return
+    if args.command == "health":
+        cmd_health(args)
+        return
     if args.command == "inbox":
         cmd_inbox(args)
         return
@@ -2507,6 +2650,14 @@ def main():
         cmd_repair(project, args)
     elif args.command == "start":
         cmd_start(project, args)
+    elif args.command == "submit":
+        cmd_submit(project, args)
+    elif args.command == "plan":
+        cmd_plan(project, args)
+    elif args.command == "review":
+        cmd_review(project, args)
+    elif args.command == "automation":
+        cmd_automation(project, args)
     elif args.command == "task":
         cmd_task(project, args)
     elif args.command == "goal":
