@@ -456,7 +456,7 @@ def render_handbook(data: dict) -> str:
         "",
         "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
         "- Codex Desktop 是 `schedulable=false` 的控制面和人工入口；只能通过 `submit` 分配给可调度 Agent，不拥有或执行 Task。",
-        "- Desktop 同步只读取 `CODEX_THREAD_ID` 绑定的本机 JSONL，仅保存 user 与 assistant commentary/final 文本；system、developer、reasoning、tool 与其他内容不会写入项目。",
+        "- Desktop 同步仅在 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` 时注册 `CODEX_THREAD_ID`，仅保存 user 与 assistant commentary/final_answer（兼容 final）文本；system、developer、reasoning、tool 与其他内容不会写入项目，公开状态只记录不可逆 thread_ref。",
         "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",
         "- Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。",
         "- 国内网络、海外出口、TLS 与 Provider 分开探测；全局海外网络故障暂停外部 CLI，单 Provider 故障只暂停对应 Driver。",

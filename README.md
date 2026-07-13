@@ -261,14 +261,14 @@ Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_ti
 
 ### Codex Desktop 对话同步
 
-`submit` 会用 `CODEX_THREAD_ID` 绑定并记录当前 Desktop interaction。显式查看或同步：
+只有当 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` 明确等于 `Codex Desktop` 时，`submit` 才会用 `CODEX_THREAD_ID` 注册或替换 Desktop checkpoint。Codex CLI、scheduler 和仅设置 `CODEX_THREAD_ID` 的进程不会改变控制线程。显式查看或同步：
 
 ```bash
 plow-whip --project MyProject desktop status
 plow-whip --project MyProject desktop sync
 ```
 
-同步完全在本地解析 Codex JSONL，不调用模型、不消耗 Token。它用本机 plow-whip 配置目录中的字节 checkpoint 去重；若受管沙箱不允许写用户配置，则回退到 Git 忽略的 `collab/.runtime/codex-desktop-sync.json`。同步只追加 user 文本和 assistant 的 commentary/final 文本到 `collab/conversations/codex/current.md`；developer、system、reasoning、tool、图片及其他内容全部排除。checkpoint 只保存 thread ID、字节偏移和同步时间，不进入 canonical/Hot 或版本库，也不保存被过滤内容或本机源文件绝对路径。scheduler 每轮先续同步已绑定线程，再使用原有阈值轮转 `current.md`。
+同步完全在本地解析 Codex JSONL，不调用模型、不消耗 Token。它用本机 plow-whip 配置目录中的字节 checkpoint 去重；若受管沙箱不允许写用户配置，则回退到 Git 忽略的 `collab/.runtime/codex-desktop-sync.json`。同步只追加 user 文本和 assistant 的 commentary/final_answer 文本（兼容旧 final）到 `collab/conversations/codex/current.md`；developer、system、reasoning、tool、图片及其他内容全部排除。原始 thread ID 仅保存在这个本机私有 checkpoint；workflow、AGENT_STATE、scheduler JSON、status 和日志只记录不可逆的 `thread_ref`。checkpoint 不进入 canonical/Hot 或版本库，也不保存被过滤内容或本机源文件绝对路径。scheduler 每轮先续同步已绑定线程，再使用原有阈值轮转 `current.md`。
 
 ### Task Planner 与粗粒度里程碑
 

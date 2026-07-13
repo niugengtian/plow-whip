@@ -151,14 +151,21 @@ class TestDispatchMain(DispatchTestBase):
         process.returncode = 0
         process.stdout = io.StringIO('{"type":"thread.started","thread_id":"codex-session-1"}\n')
         process.wait.return_value = 0
-        result = _dispatch_codex_cli("work", "P1")
+        with patch.dict(os.environ, {
+            "CODEX_THREAD_ID": "desktop-thread-must-not-leak",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
+        }):
+            result = _dispatch_codex_cli("work", "P1")
         self.assertFalse(result["success"])
         self.assertIn("任务状态未推进", result["detail"])
         session = af.load_state("P1")["task"]["cli_sessions"]["codex_cli"]
         self.assertEqual(session["session_id"], "codex-session-1")
         command = mock_popen.call_args.args[0]
+        child_env = mock_popen.call_args.kwargs["env"]
         self.assertNotIn("--ephemeral", command)
         self.assertIn("--skip-git-repo-check", command)
+        self.assertNotIn("CODEX_THREAD_ID", child_env)
+        self.assertEqual(child_env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"], "Codex CLI")
 
     @patch("plow_whip.dispatch.shutil.which", return_value="/bin/codex")
     @patch("plow_whip.dispatch.subprocess.Popen")

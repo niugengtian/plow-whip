@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime
 from pathlib import Path
 
 from .io_utils import atomic_write_json, file_lock
+
+
+_DESKTOP_ORIGINATOR = "Codex Desktop"
+
+
+def thread_ref(thread_id: str | None) -> str | None:
+    """Return a stable public reference without exposing the local thread ID."""
+    if not thread_id:
+        return None
+    return f"sha256:{hashlib.sha256(thread_id.encode('utf-8')).hexdigest()}"
+
+
+def _environment_thread_id(allow_env: bool) -> str | None:
+    """Trust the ambient thread only when Codex Desktop explicitly owns it."""
+    if not allow_env or os.environ.get("CODEX_INTERNAL_ORIGINATOR_OVERRIDE") != _DESKTOP_ORIGINATOR:
+        return None
+    return os.environ.get("CODEX_THREAD_ID") or None
 
 
 def _checkpoint_paths(project: str) -> tuple[Path, Path]:
@@ -48,7 +66,7 @@ def _message(payload: dict) -> tuple[str, str, str] | None:
         return None
     role = payload["role"]
     phase = payload.get("phase")
-    if role == "assistant" and phase not in ("commentary", "final"):
+    if role == "assistant" and phase not in ("commentary", "final_answer", "final"):
         return None
     texts = [
         item.get("text", "")
@@ -61,24 +79,24 @@ def _message(payload: dict) -> tuple[str, str, str] | None:
 
 def status(project: str, allow_env: bool = True) -> dict:
     checkpoint = _load_checkpoint(project)
-    thread_id = (os.environ.get("CODEX_THREAD_ID") if allow_env else None) or checkpoint.get("thread_id")
+    thread_id = _environment_thread_id(allow_env) or checkpoint.get("thread_id")
     source = _thread_file(thread_id) if thread_id else None
     return {
         "project": project,
-        "thread_id": thread_id,
+        "thread_ref": thread_ref(thread_id),
         "source_found": bool(source),
-        "checkpoint_offset": int(checkpoint.get("offset", 0)),
+        "checkpoint_offset": int(checkpoint.get("offset", 0)) if checkpoint.get("thread_id") == thread_id else 0,
         "source_size": source.stat().st_size if source else None,
         "last_synced_at": checkpoint.get("synced_at"),
     }
 
 
 def _sync(project: str, allow_env: bool = True) -> dict:
-    """Append only user and assistant commentary/final text; never model content."""
+    """Append only user and assistant commentary/final-answer text; never model internals."""
     from . import agent_flow as af
 
     checkpoint = _load_checkpoint(project)
-    thread_id = (os.environ.get("CODEX_THREAD_ID") if allow_env else None) or checkpoint.get("thread_id")
+    thread_id = _environment_thread_id(allow_env) or checkpoint.get("thread_id")
     source = _thread_file(thread_id) if thread_id else None
     if not thread_id or not source:
         return {**status(project, allow_env=allow_env), "synced_messages": 0, "status": "not_found"}
@@ -123,7 +141,7 @@ def _sync(project: str, allow_env: bool = True) -> dict:
     })
     return {
         "project": project,
-        "thread_id": thread_id,
+        "thread_ref": thread_ref(thread_id),
         "source_found": True,
         "checkpoint_offset": offset + len(complete_bytes),
         "source_size": source.stat().st_size,
@@ -150,11 +168,11 @@ def sync(project: str, allow_env: bool = True) -> dict:
 
 def interaction(project: str) -> dict:
     result = sync(project, allow_env=True)
-    if not result.get("thread_id"):
+    if not result.get("thread_ref"):
         return {}
     return {
         "kind": "codex_desktop",
-        "thread_id": result["thread_id"],
+        "thread_ref": result["thread_ref"],
         "checkpoint_offset": result["checkpoint_offset"],
         "recorded_at": result.get("last_synced_at"),
     }

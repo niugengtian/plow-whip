@@ -335,6 +335,12 @@ def load_state(project):
         sys.exit(1)
     with open(sf, encoding="utf-8") as f:
         state = json.load(f)
+    interaction = (state.get("workflow") or {}).get("interaction") or {}
+    legacy_thread_id = interaction.pop("thread_id", None)
+    if legacy_thread_id and "thread_ref" not in interaction:
+        from .codex_desktop import thread_ref
+
+        interaction["thread_ref"] = thread_ref(legacy_thread_id)
     base = default_state(project)
     for key in base:
         if key not in state:
@@ -370,6 +376,12 @@ def load_state(project):
 
 
 def write_state(project, state, touch=True):
+    interaction = (state.get("workflow") or {}).get("interaction") or {}
+    legacy_thread_id = interaction.pop("thread_id", None)
+    if legacy_thread_id and "thread_ref" not in interaction:
+        from .codex_desktop import thread_ref
+
+        interaction["thread_ref"] = thread_ref(legacy_thread_id)
     _apply_task_to_legacy_fields(state)
     if touch:
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
