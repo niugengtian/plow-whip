@@ -12,6 +12,8 @@ from .io_utils import atomic_write_json, file_lock
 
 
 _DESKTOP_ORIGINATOR = "Codex Desktop"
+_CHECKPOINT_SCHEMA_VERSION = 1
+_PARSER_VERSION = 2
 
 
 def thread_ref(thread_id: str | None) -> str | None:
@@ -77,6 +79,27 @@ def _message(payload: dict) -> tuple[str, str, str] | None:
     return (role, phase or "user", text) if text else None
 
 
+def _messages(chunk: bytes, *, final_answer_only: bool = False) -> list[tuple[str, str, str, str]]:
+    messages = []
+    for raw in chunk.splitlines():
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if record.get("type") != "response_item":
+            continue
+        message = _message(record.get("payload", {}))
+        if message and (not final_answer_only or message[:2] == ("assistant", "final_answer")):
+            messages.append((record.get("timestamp", ""), *message))
+    return messages
+
+
+def _block(message: tuple[str, str, str, str]) -> str:
+    timestamp, role, phase, text = message
+    label = role if role == "user" else f"assistant/{phase}"
+    return f"## Codex Desktop {label} — {timestamp}\n\n{text}"
+
+
 def status(project: str, allow_env: bool = True) -> dict:
     checkpoint = _load_checkpoint(project)
     thread_id = _environment_thread_id(allow_env) or checkpoint.get("thread_id")
@@ -101,40 +124,37 @@ def _sync(project: str, allow_env: bool = True) -> dict:
     if not thread_id or not source:
         return {**status(project, allow_env=allow_env), "synced_messages": 0, "status": "not_found"}
 
-    offset = int(checkpoint.get("offset", 0)) if checkpoint.get("thread_id") == thread_id else 0
+    same_thread = checkpoint.get("thread_id") == thread_id
+    offset = int(checkpoint.get("offset", 0)) if same_thread else 0
     if source.stat().st_size < offset:
         offset = 0
     with source.open("rb") as file:
+        historical = file.read(offset) if same_thread and offset else b""
         file.seek(offset)
         chunk = file.read()
     complete_bytes = chunk.rsplit(b"\n", 1)[0] + b"\n" if b"\n" in chunk else b""
-    messages = []
-    for raw in complete_bytes.splitlines():
-        try:
-            record = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if record.get("type") != "response_item":
-            continue
-        message = _message(record.get("payload", {}))
-        if message:
-            messages.append((record.get("timestamp", ""), *message))
+    messages = _messages(complete_bytes)
 
     current = Path(af.conversations_dir(project)) / "codex" / "current.md"
     current.parent.mkdir(parents=True, exist_ok=True)
+    if same_thread and offset and int(checkpoint.get("parser_version", 0)) < _PARSER_VERSION:
+        existing = current.read_text(encoding="utf-8") if current.exists() else ""
+        messages = [
+            message
+            for message in _messages(historical, final_answer_only=True)
+            if _block(message) not in existing
+        ] + messages
     if messages:
         with file_lock(str(current) + ".lock"):
             with current.open("a", encoding="utf-8") as file:
                 if current.stat().st_size:
                     file.write("\n")
-                blocks = []
-                for timestamp, role, phase, text in messages:
-                    label = role if role == "user" else f"assistant/{phase}"
-                    blocks.append(f"## Codex Desktop {label} — {timestamp}\n\n{text}")
-                file.write("\n\n".join(blocks) + "\n")
+                file.write("\n\n".join(_block(message) for message in messages) + "\n")
 
     synced_at = datetime.now().isoformat(timespec="seconds")
     atomic_write_json(str(_checkpoint_path(project)), {
+        "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "parser_version": _PARSER_VERSION,
         "thread_id": thread_id,
         "offset": offset + len(complete_bytes),
         "synced_at": synced_at,

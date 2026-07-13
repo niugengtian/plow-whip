@@ -82,6 +82,41 @@ class CodexDesktopTest(unittest.TestCase):
             result = codex_desktop.sync("P", allow_env=False)
         self.assertEqual(result["synced_messages"], 1)
 
+    def test_old_checkpoint_at_eof_backfills_only_missing_final_answer_once(self):
+        self._append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "already saved user"}]})
+        self._append({"type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "already saved commentary"}]})
+        self._append({"type": "message", "role": "assistant", "phase": "final", "content": [{"type": "output_text", "text": "already saved legacy final"}]})
+        self._append({"type": "message", "role": "assistant", "phase": "final_answer", "content": [{"type": "output_text", "text": "missing modern final"}]})
+        current = Path(af.conversations_dir("P"), "codex", "current.md")
+        current.write_text(
+            "## Codex Desktop user — 2026-07-14T00:00:00Z\n\nalready saved user\n\n"
+            "## Codex Desktop assistant/commentary — 2026-07-14T00:00:00Z\n\nalready saved commentary\n\n"
+            "## Codex Desktop assistant/final — 2026-07-14T00:00:00Z\n\nalready saved legacy final\n",
+            encoding="utf-8",
+        )
+        checkpoint = codex_desktop._checkpoint_path("P")
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(json.dumps({
+            "thread_id": self.thread_id,
+            "offset": self.thread_file.stat().st_size,
+            "synced_at": "2026-07-14T00:01:00",
+        }), encoding="utf-8")
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}, clear=False):
+            first = codex_desktop.sync("P", allow_env=False)
+            second = codex_desktop.sync("P", allow_env=False)
+
+        text = current.read_text(encoding="utf-8")
+        upgraded = codex_desktop._load_checkpoint("P")
+        self.assertEqual(first["synced_messages"], 1)
+        self.assertEqual(second["synced_messages"], 0)
+        self.assertEqual(text.count("already saved user"), 1)
+        self.assertEqual(text.count("already saved commentary"), 1)
+        self.assertEqual(text.count("already saved legacy final"), 1)
+        self.assertEqual(text.count("missing modern final"), 1)
+        self.assertEqual(upgraded["schema_version"], codex_desktop._CHECKPOINT_SCHEMA_VERSION)
+        self.assertEqual(upgraded["parser_version"], codex_desktop._PARSER_VERSION)
+
     def test_cli_thread_cannot_register_or_replace_desktop_checkpoint(self):
         cli_thread_id = "cli-thread-456"
         cli_file = self.codex_home / "sessions" / "2026" / "07" / "14" / f"rollout-now-{cli_thread_id}.jsonl"
