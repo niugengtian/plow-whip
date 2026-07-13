@@ -1990,6 +1990,13 @@ def cmd_task(project, args):
     state = load_state(project)
     task = state.setdefault("task", {})
     action = args.action
+    git_delivery_retry = False
+    protected_human_pause = False
+    if action == "complete" and task.get("status") == "blocked_waiting_human":
+        from . import tasking
+
+        git_delivery_retry = tasking.is_git_delivery_retry(state.get("workflow") or {}, task)
+        protected_human_pause = not git_delivery_retry
     if action == "start":
         task_id = getattr(args, "task_id", None) or f"T-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         owner = getattr(args, "owner", None) or state.get("current_agent")
@@ -2021,17 +2028,19 @@ def cmd_task(project, args):
         state["assigned_agent"] = owner
         state["phase"] = task_id
     else:
-        if getattr(args, "output", None) is not None:
+        if not protected_human_pause and getattr(args, "output", None) is not None:
             task["last_output"] = args.output
-        if getattr(args, "next", None) is not None:
+        if not protected_human_pause and getattr(args, "next", None) is not None:
             task["next_action"] = args.next
-        if getattr(args, "acceptance", None) is not None:
+        if not protected_human_pause and getattr(args, "acceptance", None) is not None:
             task["acceptance"] = args.acceptance
-        if getattr(args, "verify", None) is not None:
+        if not protected_human_pause and getattr(args, "verify", None) is not None:
             task["verify_commands"] = args.verify
-        if getattr(args, "rule_tags", None) is not None:
+        if not protected_human_pause and getattr(args, "rule_tags", None) is not None:
             task["rule_tags"] = args.rule_tags
-        if action == "block":
+        if protected_human_pause:
+            action = "blocked_waiting_human"
+        elif action == "block":
             task["status"] = "blocked"
             task["blockers"] = getattr(args, "blockers", None) or []
         elif action == "complete":
@@ -2068,6 +2077,8 @@ def cmd_task(project, args):
     completed_task = task
     goal = state.get("goal") or {}
     workflow_handled = False
+    if action == "complete" and task.get("status") == "done" and git_delivery_retry:
+        state["workflow"]["status"] = "active"
     if action == "complete" and task.get("status") == "done" and (state.get("workflow") or {}).get("status") == "active":
         from . import tasking
 

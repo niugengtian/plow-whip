@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import plow_whip.agent_flow as af
-from plow_whip import protocol, routing, scheduler
+from plow_whip import git_flow, protocol, routing, scheduler
 from plow_whip.whip import run_once
 
 
@@ -235,6 +235,67 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(task["status"], "active")
         self.assertEqual(task["next_action"], "Fix verification failure: false")
         self.assertIn("broken", task["last_output"])
+
+    def _save_git_delivery_blocker(self):
+        state = af.load_state("P")
+        state["workflow"] = {
+            "id": "T-delivery", "status": "blocked_waiting_human", "code_change": True,
+            "queue": [], "git": {"branch": "plow/t-delivery", "target_branch": "main"},
+            "completed": [{"id": "T-delivery-REVIEW", "title": "Review"}],
+        }
+        state["task"] = {
+            "id": "T-delivery-REVIEW", "title": "Review", "owner": "codex_cli",
+            "status": "blocked_waiting_human", "stage": "review",
+            "next_action": "Resolve Git fast-forward blocker", "acceptance": [],
+            "verify_commands": [], "rule_tags": [], "last_output": "reviewed",
+            "blockers": ["origin/main moved and cannot fast-forward"], "decision_ids": [],
+            "cli_sessions": {},
+        }
+        af.save_state("P", state)
+
+    def test_git_delivery_blocker_retries_and_completes(self):
+        self._save_git_delivery_blocker()
+        delivery = {"branch": "plow/t-delivery", "target_branch": "main", "commit": "abc", "pushed": True, "merged": True}
+        with patch("plow_whip.tasking.git_flow.finalize_fast_forward", return_value=delivery) as finalize:
+            af.cmd_task("P", FakeArgs(action="complete", output="retry delivery", next=None, json=False))
+        state = af.load_state("P")
+        self.assertEqual(state["workflow"]["status"], "done")
+        self.assertEqual(state["task"]["status"], "done")
+        self.assertEqual(state["workflow"]["delivery"], delivery)
+        self.assertEqual(len(state["workflow"]["completed"]), 1)
+        finalize.assert_called_once()
+
+    def test_git_delivery_blocker_stays_blocked_when_retry_fails(self):
+        self._save_git_delivery_blocker()
+        with patch(
+            "plow_whip.tasking.git_flow.finalize_fast_forward",
+            side_effect=git_flow.GitFlowBlocked("latest fast-forward blocker"),
+        ):
+            af.cmd_task("P", FakeArgs(action="complete", output="retry delivery", next=None, json=False))
+        state = af.load_state("P")
+        self.assertEqual(state["workflow"]["status"], "blocked_waiting_human")
+        self.assertEqual(state["task"]["status"], "blocked_waiting_human")
+        self.assertEqual(state["task"]["blockers"], ["latest fast-forward blocker"])
+
+    def test_plan_confirmation_is_not_released_by_task_complete(self):
+        state = af.load_state("P")
+        state["workflow"] = {
+            "id": "T-plan", "status": "awaiting_confirmation", "code_change": True,
+            "plan": [{"title": "Build"}],
+        }
+        state["task"].update({
+            "status": "blocked_waiting_human", "stage": "planning",
+            "next_action": "Wait for human plan confirmation",
+            "blockers": ["plan_confirmation_required"],
+        })
+        af.save_state("P", state)
+        with patch("plow_whip.tasking.git_flow.finalize_fast_forward") as finalize:
+            af.cmd_task("P", FakeArgs(action="complete", output="must not resume", next=None, json=False))
+        state = af.load_state("P")
+        self.assertEqual(state["workflow"]["status"], "awaiting_confirmation")
+        self.assertEqual(state["task"]["status"], "blocked_waiting_human")
+        self.assertEqual(state["task"]["blockers"], ["plan_confirmation_required"])
+        finalize.assert_not_called()
 
     def test_goal_plan_advances_coarse_milestones_and_finishes_only_at_end(self):
         af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))

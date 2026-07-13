@@ -408,6 +408,18 @@ def reject_plan(project: str, reason: str) -> dict:
     return {"project": project, "workflow": workflow, "task": task}
 
 
+def is_git_delivery_retry(workflow: dict, task: dict) -> bool:
+    """Return whether a human-blocked task may retry the FF-only delivery step."""
+    return bool(
+        workflow.get("status") == "blocked_waiting_human"
+        and workflow.get("code_change")
+        and not workflow.get("queue")
+        and task.get("status") == "blocked_waiting_human"
+        and task.get("next_action") == "Resolve Git fast-forward blocker"
+        and task.get("blockers")
+    )
+
+
 def escalate_to_planner(project: str, reason: str) -> dict:
     """Preserve branch/session/worktree and replace only the active executor with planning."""
     from . import agent_flow as af
@@ -442,11 +454,12 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
     workflow = state.get("workflow") or {}
     if workflow.get("status") != "active":
         return None
-    workflow.setdefault("completed", []).append({
-        "id": completed_task.get("id"), "title": completed_task.get("title"),
-        "owner": completed_task.get("owner"), "output": completed_task.get("last_output", "")[-1000:],
-        "execution": copy.deepcopy(completed_task.get("execution", {})),
-    })
+    if not any(item.get("id") == completed_task.get("id") for item in workflow.setdefault("completed", [])):
+        workflow["completed"].append({
+            "id": completed_task.get("id"), "title": completed_task.get("title"),
+            "owner": completed_task.get("owner"), "output": completed_task.get("last_output", "")[-1000:],
+            "execution": copy.deepcopy(completed_task.get("execution", {})),
+        })
     if completed_task.get("stage") == "implementation":
         workflow["last_implementation"] = copy.deepcopy(completed_task)
     if workflow.get("queue"):
