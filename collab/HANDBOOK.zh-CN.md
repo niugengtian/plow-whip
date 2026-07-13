@@ -57,23 +57,24 @@
 | 规则、Registry、编排配置 | `collab/AGENT_PROTOCOL.json` |
 | 当前 Task、Workflow、Session 绑定 | `collab/AGENT_STATE.json` |
 | Simple-tasker 完整持久会话 | `collab/memory/sessions/<task>_simple_tasker.jsonl` |
+| Codex Desktop 文本镜像 | `collab/conversations/codex/current.md`（checkpoint 位于本机配置，受管环境回退到 Git 忽略的 `collab/.runtime/`） |
 | CLI 熔断与 Worker 进程登记 | 框架运行目录中的 `health.json`、`workers.json` |
 | 分支与远端交付结果 | Git refs 与远端仓库 |
 | 中文手册、Agent 阵容表、兼容 Markdown | 派生视图，不是真源 |
 
 ## Agent 阵容
 
-| Agent | Roles | Driver | Capabilities | Assignment |
-|---|---|---|---|---|
-| `codex` | planner, coordinator, reviewer | codex_cli | * | — |
-| `cursor` | implementation, reviewer | zellij | * | 桌面打工仔 |
-| `cursor_cli` | planner, implementation, reviewer | cursor_cli | * | CLI 打工仔 |
-| `codex_cli` | planner, implementation, reviewer | codex_cli | * | — |
-| `reviewer` | reviewer | file | review | Review implementation and risks |
-| `goal-planner` | planner | codex_cli | e2e-plan | Plan coarse goals |
-| `e2e-worker` | e2e-worker | cursor_cli | e2e-readonly | Run read-only implementation acceptance |
-| `e2e-worker-backup` | e2e-worker | codex_cli | e2e-readonly | Take over failed E2E worker runs |
-| `e2e-auditor` | e2e-auditor | codex_cli | e2e-review | Independently accept completed E2E work |
+| Agent | Roles | Driver | Schedulable | Capabilities | Assignment |
+|---|---|---|---|---|---|
+| `codex` | control-plane | control | no | human-interaction | — |
+| `cursor` | implementation, reviewer | zellij | yes | * | 桌面打工仔 |
+| `cursor_cli` | planner, implementation, reviewer | cursor_cli | yes | * | CLI 打工仔 |
+| `codex_cli` | planner, implementation, reviewer | codex_cli | yes | * | — |
+| `reviewer` | reviewer | file | yes | review | Review implementation and risks |
+| `goal-planner` | planner | codex_cli | yes | e2e-plan | Plan coarse goals |
+| `e2e-worker` | e2e-worker | cursor_cli | yes | e2e-readonly | Run read-only implementation acceptance |
+| `e2e-worker-backup` | e2e-worker | codex_cli | yes | e2e-readonly | Take over failed E2E worker runs |
+| `e2e-auditor` | e2e-auditor | codex_cli | yes | e2e-review | Independently accept completed E2E work |
 
 > `goal-planner` 仅保留兼容；默认规划使用 `orchestration.default_planner`，除非任务明确指定。
 
@@ -84,6 +85,8 @@
 ## 密钥与网络边界
 
 - Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。
+- Codex Desktop 是 `schedulable=false` 的控制面和人工入口；只能通过 `submit` 分配给可调度 Agent，不拥有或执行 Task。
+- Desktop 同步仅在 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` 时注册 `CODEX_THREAD_ID`，仅保存 user 与 assistant commentary/final_answer（兼容 final）文本；system、developer、reasoning、tool 与其他内容不会写入项目，公开状态只记录不可逆 thread_ref。
 - DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。
 - Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。
 - 国内网络、海外出口、TLS 与 Provider 分开探测；全局海外网络故障暂停外部 CLI，单 Provider 故障只暂停对应 Driver。
