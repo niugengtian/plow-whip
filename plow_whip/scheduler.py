@@ -53,7 +53,7 @@ def scheduler_paths(config_dir: str, system: str | None = None) -> dict:
     }
 
 
-def command(auto_crack: bool = False) -> list[str]:
+def command(auto_crack: bool = True) -> list[str]:
     executable = shutil.which("plow-whip")
     cmd = ([os.path.abspath(executable)] if executable else [sys.executable, "-m", "plow_whip.agent_flow"])
     cmd.extend(["whip", "--once", "--json"])
@@ -62,7 +62,7 @@ def command(auto_crack: bool = False) -> list[str]:
     return cmd
 
 
-def render(config_dir: str, interval: int = 300, auto_crack: bool = False, system: str | None = None) -> dict:
+def render(config_dir: str, interval: int = 60, auto_crack: bool = True, system: str | None = None) -> dict:
     if interval < 1:
         raise ValueError("interval must be at least 1 second")
     paths = scheduler_paths(config_dir, system)
@@ -109,7 +109,7 @@ def render(config_dir: str, interval: int = 300, auto_crack: bool = False, syste
     }
 
 
-def install(config_dir: str, interval: int = 300, auto_crack: bool = False, system: str | None = None, dry_run: bool = False) -> dict:
+def install(config_dir: str, interval: int = 60, auto_crack: bool = True, system: str | None = None, dry_run: bool = False) -> dict:
     spec = render(config_dir, interval, auto_crack, system)
     if dry_run:
         return {**spec, "installed": False, "dry_run": True}
@@ -231,7 +231,7 @@ def repair(config_dir: str, system: str | None = None) -> dict:
     current = status(config_dir, system)
     return install(
         config_dir,
-        interval=int(current.get("interval_seconds", 300)),
+        interval=int(current.get("interval_seconds", 60)),
         auto_crack=bool(current.get("auto_continue", current.get("auto_crack", False))),
         system=system,
     )

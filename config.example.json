@@ -1,22 +1,27 @@
 {
   "projects_dir": "/absolute/path/to/projects-root",
   "agents": [
-    "planner",
-    "builder",
-    "reviewer"
+    "codex_cli",
+    "cursor_cli",
+    "simple-tasker"
   ],
   "agent_meta": {
-    "planner": {
-      "role": "PM / Architect",
-      "assignment": "Break work into clear tasks and decide what should happen next."
+    "codex_cli": {
+      "role": "Planner / Code Owner",
+      "roles": ["planner", "implementation", "reviewer"],
+      "driver": "codex_cli"
     },
-    "builder": {
-      "role": "Code Owner",
-      "assignment": "Implement scoped tasks and report changed files plus checks."
+    "cursor_cli": {
+      "role": "Code Owner / Reviewer",
+      "roles": ["implementation", "reviewer"],
+      "driver": "cursor_cli"
     },
-    "reviewer": {
-      "role": "Reviewer",
-      "assignment": "Review implementation, run checks, and report risks."
+    "simple-tasker": {
+      "role": "Low-cost simple task executor",
+      "roles": ["implementation"],
+      "capabilities": ["simple-task"],
+      "driver": "simple_tasker",
+      "cost_tier": "low"
     }
   }
 }

@@ -1,81 +1,87 @@
 {
-  "current_agent": "codex",
-  "phase": "T-20260713190011",
+  "current_agent": "cursor_cli",
+  "phase": "T-20260713-UNATTENDED-FINAL-REVIEW",
   "status": "done",
   "task_context": {
     "day": 0,
     "topic": "",
     "project_dir": ""
   },
-  "last_output": "README 产品级首页重构完成：首屏明确产品、受众与差异；提供安装到首个可验证任务的最短路径；完整覆盖 Registry/Router/Driver、原子状态机、Goal、原生 Scheduler、真实无人值守链路与边界、CLI 认证和会话生命周期；新增完整命令索引与贡献入口。README 内部锚点和本地链接已校验。",
+  "last_output": "APPROVED: 原子 claim 经 supervisor.claim_task 统一入口，direct drive(dispatch) 与 scheduler(_spawn) 无旁路；Reviewer 独立 Task 以空 cli_sessions 开新会话，reject_review 恢复 last_implementation 原会话；simple-tasker run_command 过滤 SENSITIVE_ENV 且禁止 env/printenv；检查+修复类任务因 WRITE_SIGNALS 不误判只读；熔断/Git FF/无人值守规则与测试均成立。149 tests OK。",
   "files_changed": [],
   "verify_commands": [
-    "python3 -m unittest discover -s tests -q",
-    "python3 -m plow_whip.agent_flow --help"
+    "python3 -m unittest discover -s tests"
   ],
-  "assigned_agent": "codex",
+  "assigned_agent": "cursor_cli",
   "blockers": [],
   "last_wake_hash": "2c59ed653bda274e5e7c2513d9d088b01aa275ca00075359d4247ccc8fcbc21b",
   "last_woken_at": "2026-07-13T19:06:09",
   "wake_count": 1,
   "next_action": "",
-  "updated_at": "2026-07-13T19:06:09",
+  "updated_at": "2026-07-13T23:47:05",
   "project_id": "plow-whip",
   "project_root": ".",
   "task": {
-    "id": "T-20260713190011",
-    "title": "重构 plow-whip README 为产品级首页",
-    "goal": "重构 plow-whip README 为产品级首页",
-    "owner": "codex",
+    "id": "T-20260713-UNATTENDED-FINAL-REVIEW",
+    "title": "Final independent review after atomic claim fixes",
+    "goal": "Final independent review after atomic claim fixes",
+    "owner": "cursor_cli",
     "status": "done",
     "next_action": "",
     "acceptance": [
-      "首屏能够在一分钟内解释产品、受众和差异",
-      "提供从安装到首个可验证任务的最短成功路径",
-      "完整保留 Registry Router Driver、状态机、Goal、Scheduler、CLI 会话和认证等关键能力",
-      "所有命令与当前 CLI 一致",
-      "Markdown 结构清晰且内部锚点有效"
+      "原子 claim 无旁路",
+      "Reviewer 独立会话成立",
+      "敏感环境不下放",
+      "149+ tests pass"
     ],
     "verify_commands": [
-      "python3 -m unittest discover -s tests -q",
-      "python3 -m plow_whip.agent_flow --help"
+      "python3 -m unittest discover -s tests"
     ],
-    "rule_tags": [],
-    "last_output": "README 产品级首页重构完成：首屏明确产品、受众与差异；提供安装到首个可验证任务的最短路径；完整覆盖 Registry/Router/Driver、原子状态机、Goal、原生 Scheduler、真实无人值守链路与边界、CLI 认证和会话生命周期；新增完整命令索引与贡献入口。README 内部锚点和本地链接已校验。",
+    "rule_tags": [
+      "review"
+    ],
+    "last_output": "APPROVED: 原子 claim 经 supervisor.claim_task 统一入口，direct drive(dispatch) 与 scheduler(_spawn) 无旁路；Reviewer 独立 Task 以空 cli_sessions 开新会话，reject_review 恢复 last_implementation 原会话；simple-tasker run_command 过滤 SENSITIVE_ENV 且禁止 env/printenv；检查+修复类任务因 WRITE_SIGNALS 不误判只读；熔断/Git FF/无人值守规则与测试均成立。149 tests OK。",
     "blockers": [],
     "decision_ids": [],
     "cli_sessions": {
-      "codex_cli": {
-        "session_id": "019f5b23-fefb-7fd0-9388-453fd568cc3f",
+      "cursor_cli": {
+        "session_id": "49a7e8b4-f52b-44a2-a03d-04d2a6ab7e10",
         "status": "archived",
-        "created_at": "2026-07-13T19:01:57",
+        "created_at": "2026-07-13T23:45:38",
         "auth_profile": "desktop",
         "model": null,
-        "archived_at": "2026-07-13T19:05:48"
+        "archived_at": "2026-07-13T23:46:56"
       }
+    },
+    "execution": {
+      "dispatch_id": "DP-48b8b07451ce",
+      "driver": "cursor_cli",
+      "logical_owner": "cursor_cli",
+      "status": "completed",
+      "claimed_at": "2026-07-13T23:45:30",
+      "cli_pid": 32015,
+      "cli_started_at": "2026-07-13T23:45:30",
+      "executor": "cursor_cli",
+      "session_id": "49a7e8b4-f52b-44a2-a03d-04d2a6ab7e10",
+      "pid": 32015,
+      "auth_profile": "desktop",
+      "attempts": [
+        {
+          "profile": "desktop",
+          "model": null,
+          "returncode": 0
+        }
+      ]
     },
     "verification": [
       {
-        "command": "python3 -m unittest discover -s tests -q",
+        "command": "python3 -m unittest discover -s tests",
         "returncode": 0,
-        "output": "\n📋 Phase: P\n📌 Output: Done\n➡️  codex please: Next\n\n\u0007   📝 qoder session: 17 lines, 0.3KB — no rotation needed\n\n🆕 Project 'DoneProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab/AGENT_STATE.json\n   Run: plow-whip --project DoneProject start --agent qoder --json\n\n\n🆕 Project 'ProjectA' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectA start --agent qoder --json\n\n\n🆕 Project 'ProjectB' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectB start --agent qoder --json\n\n\n🆕 Project 'TestProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab/AGENT_STATE.json\n   Run: plow-whip --project TestProject start --agent qoder --json\n\nwarning: continuous whip flags are deprecated; install the native scheduler for repetition\n----------------------------------------------------------------------\nRan 130 tests in 3.615s\n\nOK"
-      },
-      {
-        "command": "python3 -m plow_whip.agent_flow --help",
-        "returncode": 0,
-        "output": "-auth,drive,permit}\n    configure           Configure plow-whip\n    list                List all active projects\n    agent               List or edit agents\n    status              View project status\n    doctor              Check plow-whip mechanism and optionally repair it\n    repair              Explicitly create or repair missing plow-whip\n                        structure\n    start               Return the complete minimal startup payload\n    task                Atomically update the current task\n    goal                Start and run a coarse milestone goal\n    handoff             Handoff to next agent\n    reset               Reset project state\n    init                Initialize new project\n    new                 Create a new project and initialize plow-whip\n    archive             Archive completed project\n    watch               Watch project state changes\n    session             View agent session status\n    rotate              Rotate agent session\n    sessions-overview   All sessions overview\n    context-pack        Deprecated alias for start\n    memory-rotate       Check and rotate all collab/memory files\n    memory-budget       Show Hot/Warm/Cold token budget\n    rotation-health     Show rotation thresholds and overdue files\n    brain               DeepSeek brain for simple tasks\n    sync                Sync framework templates to all projects\n    bind-tab            Bind project to zellij tab\n    whip                plow-whip — actively drive agents to work\n    scheduler           Manage native per-user scheduling\n    inbox               Inspect or update dispatch lifecycle\n    cli-auth            Manage Desktop auth or referenced API key pools\n    drive               Drive any registered logical agent through its\n                        configured driver\n    permit              Set dispatch permission\n\noptional arguments:\n  -h, --help            show this help message and exit\n  --project PROJECT, -p PROJECT\n                        Target project name"
+        "output": "collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab/AGENT_STATE.json\n   Run: plow-whip --project DoneProject start --agent qoder --json\n\n\n🆕 Project 'ProjectA' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectA start --agent qoder --json\n\n\n🆕 Project 'ProjectB' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectB start --agent qoder --json\n\n\n🆕 Project 'TestProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab/AGENT_STATE.json\n   Run: plow-whip --project TestProject start --agent qoder --json\n\n....................................................................................................................warning: continuous whip flags are deprecated; install the native scheduler for repetition\n.................................\n----------------------------------------------------------------------\nRan 149 tests in 4.676s\n\nOK"
       }
-    ],
-    "execution": {
-      "dispatch_id": "DP-061b107fc9bc",
-      "logical_owner": "codex",
-      "executor": "codex",
-      "driver": "codex_cli",
-      "status": "completed",
-      "session_id": "019f5b23-fefb-7fd0-9388-453fd568cc3f"
-    }
+    ]
   },
-  "revision": 87,
+  "revision": 101,
   "last_dispatch_id": "DP-061b107fc9bc",
   "last_wake_status": "completed",
   "automation_enabled": true,
@@ -102,5 +108,6 @@
     "queue": []
   },
   "goal_queue": [],
-  "goal_history": []
+  "goal_history": [],
+  "workflow": null
 }

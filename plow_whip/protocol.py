@@ -18,6 +18,7 @@ DEFAULT_ROLES = {
     "cursor": "Cursor Desktop",
     "cursor_cli": "Cursor CLI",
     "reviewer": "Reviewer",
+    "simple-tasker": "Simple Tasker (DeepSeek)",
 }
 
 DEFAULT_AGENT_ROUTING = {
@@ -26,10 +27,23 @@ DEFAULT_AGENT_ROUTING = {
     "cursor": {"roles": ["implementation", "reviewer"], "capabilities": ["*"], "driver": "zellij"},
     "cursor_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "cursor_cli", "priority": 70, "cost_tier": "low"},
     "reviewer": {"roles": ["reviewer"], "capabilities": ["review"], "driver": "file"},
+    "simple-tasker": {
+        "roles": ["implementation"], "capabilities": ["simple-task"],
+        "driver": "simple_tasker", "priority": 90, "cost_tier": "low",
+    },
 }
 
-EXECUTION_DRIVERS = {"codex_cli", "cursor_cli", "zellij", "file"}
+EXECUTION_DRIVERS = {"codex_cli", "cursor_cli", "simple_tasker", "zellij", "file"}
 COST_TIERS = {"low", "medium", "high"}
+
+DEFAULT_ORCHESTRATION = {
+    "default_planner": "codex_cli",
+    "default_target_branch": "main",
+    "scheduler_interval_seconds": 60,
+    "max_concurrency_per_driver": 5,
+    "retry_limit": 3,
+    "circuit_recovery_successes": 3,
+}
 
 
 def normalize_role(value: str) -> str:
@@ -224,6 +238,7 @@ def default_protocol(project: str, agents: list[str], agent_meta: dict | None = 
             agent: normalize_agent(agent, agent_meta.get(agent, {}))
             for agent in agents
         },
+        "orchestration": dict(DEFAULT_ORCHESTRATION),
         "memory": {
             "hot": ["AGENT_STATE.json"],
             "machine": ["AGENT_PROTOCOL.json"],
@@ -258,6 +273,11 @@ def ensure(project_dir: str, project: str, agents: list[str], agent_meta: dict |
                 changed = True
         changed = normalize_rules(data) or changed
         changed = normalize_agents(data) or changed
+        orchestration = data.setdefault("orchestration", {})
+        for key, value in DEFAULT_ORCHESTRATION.items():
+            if key not in orchestration:
+                orchestration[key] = value
+                changed = True
         memory = data.setdefault("memory", {})
         hot = memory.setdefault("hot", ["AGENT_STATE.json"])
         if "AGENT_PROTOCOL.json" in hot:

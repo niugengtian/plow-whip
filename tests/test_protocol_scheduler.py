@@ -199,13 +199,13 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["goal"]["status"], "done")
         self.assertEqual(state["task"]["status"], "done")
 
-    def test_goal_defaults_to_cursor_cli_then_codex_cli_for_lower_cost_planning(self):
+    def test_goal_compatibility_path_uses_configured_default_planner(self):
         data = af.load_protocol("P")
         data["agents"]["cursor_cli"] = {"role": "Cursor CLI", "assignment": "", "enabled": True}
         data["agents"]["codex_cli"] = {"role": "Codex CLI", "assignment": "", "enabled": True}
         protocol.save(af.project_dir("P"), data)
         af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner=None))
-        self.assertEqual(af.load_state("P")["task"]["owner"], "cursor_cli")
+        self.assertEqual(af.load_state("P")["task"]["owner"], "codex_cli")
         next_action = af.load_state("P")["task"]["next_action"]
         self.assertIn("do not scan the repository", next_action)
         self.assertIn("run tests during planning", next_action)
@@ -346,11 +346,13 @@ class ProtocolSchedulerTest(unittest.TestCase):
         windows = scheduler.render(self.config, system="Windows")
         self.assertIn("StartInterval", mac["content"])
         self.assertIn("<key>PATH</key>", mac["content"])
-        self.assertIn("OnUnitActiveSec=300", linux["content"]["timer"])
+        self.assertIn("OnUnitActiveSec=60", linux["content"]["timer"])
         self.assertIn("Environment=PATH=", linux["content"]["service"])
         self.assertEqual(windows["content"]["task_name"], "PlowWhipScheduler")
         self.assertTrue(any("--once" in arg for arg in windows["content"]["arguments"]))
         self.assertNotIn("--auto-rotate", scheduler.command())
+        self.assertIn("--crack", scheduler.command())
+        self.assertIn("--opt-in-only", scheduler.command())
         continuing = scheduler.render(self.config, auto_crack=True, system="Linux")
         self.assertTrue(continuing["auto_continue"])
         self.assertIn("--crack", continuing["content"]["service"])

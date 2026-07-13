@@ -230,8 +230,8 @@ plow-whip --project MyProject bind-tab --tab 2 --name "项目名"
 # 手动抽鞭
 plow-whip whip --crack
 
-# 启动自动挥舞
-plow-whip whip --auto-crack --interval 300
+# 安装默认每分钟无人值守调度
+plow-whip scheduler install
 
 # 启动 watcher（另一个终端）
 python3 -u -m plow_whip.inbox_watcher --agent qoder --interval 3

@@ -10,6 +10,8 @@ dispatch.py — 将逻辑 Agent 解析成可执行 Driver，并按同职责候�
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import shutil
 import shlex
@@ -23,6 +25,7 @@ from datetime import datetime
 from . import agent_flow as af
 from . import routing
 from .brain import Brain, classify_complexity
+from .simple_tasker import SimpleTasker
 from .io_utils import atomic_write_json, file_lock
 
 
@@ -148,6 +151,8 @@ def _driver_available(driver: str) -> bool:
         return bool(shutil.which("codex") or shutil.which("npx"))
     if driver == "cursor_cli":
         return bool(shutil.which("cursor-agent"))
+    if driver == "simple_tasker":
+        return Brain().available
     if driver == "zellij":
         return _zellij_available()
     if driver == "notify":
@@ -232,6 +237,8 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
 def _task_marker(state: dict) -> str:
     task = dict(state.get("task", {}))
     task.pop("cli_sessions", None)
+    task.pop("execution", None)
+    task.pop("attempts", None)
     return json.dumps(task, ensure_ascii=False, sort_keys=True)
 
 
@@ -275,6 +282,26 @@ def _event_session_id(event: dict) -> str | None:
     )
 
 
+def _record_running_pid(project: str, driver: str, dispatch_id: str | None, pid: int) -> None:
+    """Persist the real CLI PID while it is running, preserving the wrapper PID."""
+    for _ in range(5):
+        state = af.load_state(project)
+        task = state.get("task") or {}
+        execution = task.setdefault("execution", {})
+        if execution.get("dispatch_id") != dispatch_id:
+            raise RuntimeError(f"task execution claim changed before {driver} pid={pid} started")
+        execution.update({
+            "dispatch_id": dispatch_id, "driver": driver, "cli_pid": pid,
+            "status": "running", "cli_started_at": datetime.now().isoformat(timespec="seconds"),
+        })
+        try:
+            af.save_state(project, state)
+            return
+        except RuntimeError:
+            continue
+    raise RuntimeError(f"could not persist running {driver} pid after concurrent state updates")
+
+
 def _terminate_process_group(process) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -298,7 +325,12 @@ def _run_streaming_cli(cmd: list[str], cwd: str, timeout: int, on_event, on_star
         env=env,
     )
     if on_start:
-        on_start(process.pid)
+        try:
+            on_start(process.pid)
+        except Exception:
+            _terminate_process_group(process)
+            process.wait()
+            raise
     timed_out = threading.Event()
 
     def stop():
@@ -413,7 +445,9 @@ def _dispatch_cursor_cli(
     session = _existing_cli_session(project, "cursor_cli")
 
     try:
-        initial_marker = _task_marker(af.load_state(project))
+        initial_state = af.load_state(project)
+        initial_marker = _task_marker(initial_state)
+        initial_task_id = (initial_state.get("task") or {}).get("id")
         captured = {"session_id": session.get("session_id") if session else None}
         active_route = {}
 
@@ -436,10 +470,10 @@ def _dispatch_cursor_cli(
                 _record_cli_session(project, "cursor_cli", session_id, active_route)
                 captured["session_id"] = session_id
 
-        on_start = (
-            lambda pid: update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
-            if agent and dispatch_id else None
-        )
+        def on_start(pid):
+            _record_running_pid(project, "cursor_cli", dispatch_id, pid)
+            if agent and dispatch_id:
+                update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
         result = _run_cli_candidates(
             "cursor_cli", build_command, project_path, timeout, on_event, on_start, active_route,
         )
@@ -450,8 +484,17 @@ def _dispatch_cursor_cli(
         if result["returncode"] == 0 and not captured["session_id"]:
             return {"success": False, "channel": "cursor_cli", "detail": "cursor 成功退出但未返回 session_id", "pid": result["pid"]}
         if result["returncode"] == 0:
-            if _task_marker(af.load_state(project)) == initial_marker:
+            current_state = af.load_state(project)
+            if _task_marker(current_state) == initial_marker:
                 return {"success": False, "channel": "cursor_cli", "detail": "cursor 正常退出但任务状态未推进", "pid": result["pid"], "session_id": captured["session_id"]}
+            current_task = current_state.get("task") or {}
+            if current_task.get("id") == initial_task_id and any(
+                item.get("returncode") for item in current_task.get("verification", [])
+            ):
+                return {
+                    "success": False, "channel": "cursor_cli", "detail": "verification failed; resume same session",
+                    "pid": result["pid"], "session_id": captured["session_id"], "attempts": result["attempts"],
+                }
             return {
                 "success": True,
                 "channel": "cursor_cli",
@@ -520,7 +563,9 @@ def _dispatch_codex_cli(
         "exec",
     ]
     session = _existing_cli_session(project, "codex_cli")
-    initial_marker = _task_marker(af.load_state(project))
+    initial_state = af.load_state(project)
+    initial_marker = _task_marker(initial_state)
+    initial_task_id = (initial_state.get("task") or {}).get("id")
     try:
         captured = {"session_id": session.get("session_id") if session else None}
         active_route = {}
@@ -547,10 +592,10 @@ def _dispatch_codex_cli(
                 _record_cli_session(project, "codex_cli", session_id, active_route)
                 captured["session_id"] = session_id
 
-        on_start = (
-            lambda pid: update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
-            if agent and dispatch_id else None
-        )
+        def on_start(pid):
+            _record_running_pid(project, "codex_cli", dispatch_id, pid)
+            if agent and dispatch_id:
+                update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
         result = _run_cli_candidates(
             "codex_cli", build_command, project_path, timeout, on_event, on_start, active_route,
         )
@@ -567,13 +612,22 @@ def _dispatch_codex_cli(
         if result["returncode"] == 0 and not captured["session_id"]:
             return {"success": False, "channel": "codex_cli", "detail": "codex 成功退出但未返回 session_id", "pid": result["pid"]}
         if result["returncode"] == 0:
-            if _task_marker(af.load_state(project)) == initial_marker:
+            current_state = af.load_state(project)
+            if _task_marker(current_state) == initial_marker:
                 return {
                     "success": False,
                     "channel": "codex_cli",
                     "detail": f"codex pid={result['pid']} 正常退出但任务状态未推进",
                     "pid": result["pid"],
                     "session_id": captured["session_id"],
+                }
+            current_task = current_state.get("task") or {}
+            if current_task.get("id") == initial_task_id and any(
+                item.get("returncode") for item in current_task.get("verification", [])
+            ):
+                return {
+                    "success": False, "channel": "codex_cli", "detail": "verification failed; resume same session",
+                    "pid": result["pid"], "session_id": captured["session_id"], "attempts": result["attempts"],
                 }
             return {
                 "success": True,
@@ -644,6 +698,77 @@ def _dispatch_brain(agent: str, prompt: str, project: str) -> dict:
     else:
         return {"success": False, "channel": "brain", "detail": result["reason"]}
 
+
+def _dispatch_simple_tasker(agent: str, prompt: str, project: str) -> dict:
+    """Run or resume one file-persisted simple-tasker session."""
+    from types import SimpleNamespace
+    from . import tasking
+
+    state = af.load_state(project)
+    task = state.get("task") or {}
+    task_id = task.get("id", "T-001")
+    runner = SimpleTasker(af.project_dir(project), task_id)
+    context = json.dumps({
+        "project": project,
+        "acceptance": task.get("acceptance", []),
+        "verify_commands": task.get("verify_commands", []),
+        "branch": (state.get("workflow") or {}).get("git", {}).get("branch"),
+    }, ensure_ascii=False)
+    try:
+        result = runner.run(task.get("next_action") or task.get("title") or prompt, context)
+    except Exception as exc:
+        return {
+            "success": False, "channel": "simple_tasker",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "session_id": f"simple-tasker:{task_id}",
+        }
+    state = af.load_state(project)
+    if state.get("task", {}).get("id") == task_id:
+        session = state["task"].setdefault("cli_sessions", {}).setdefault("simple_tasker", {})
+        session.update({
+            "session_id": result.get("session_id"), "status": result.get("status"),
+            "created_at": session.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+            "key_ref": result.get("key_ref"), "session_file": os.path.relpath(result.get("session_file", runner.session_path), af.project_dir(project)),
+        })
+        af.save_state(project, state)
+
+    if result.get("status") == "needs_planner":
+        tasking.escalate_to_planner(project, result.get("reason") or "simple-tasker requested planning")
+        return {
+            "success": True, "channel": "simple_tasker", "detail": "simple-tasker escalated to planner",
+            "output": result.get("reason", ""), "session_id": result.get("session_id"), "key_ref": result.get("key_ref"),
+        }
+    if result.get("status") != "completed":
+        return {
+            "success": False, "channel": "simple_tasker", "detail": result.get("reason", "simple-tasker failed"),
+            "session_id": result.get("session_id"), "key_ref": result.get("key_ref"),
+        }
+
+    if (state.get("workflow") or {}).get("code_change") and not result.get("verify_commands"):
+        return {
+            "success": False, "channel": "simple_tasker",
+            "detail": "simple-tasker completed without executable verify_commands",
+            "session_id": result.get("session_id"), "key_ref": result.get("key_ref"),
+        }
+
+    state = af.load_state(project)
+    if state.get("task", {}).get("id") == task_id and result.get("verify_commands"):
+        state["task"]["verify_commands"] = list(result["verify_commands"])
+        af.save_state(project, state)
+    with contextlib.redirect_stdout(io.StringIO()):
+        af.cmd_task(project, SimpleNamespace(action="complete", output=result.get("summary", "completed"), next=None, json=True))
+    current = af.load_state(project)
+    if current.get("task", {}).get("id") == task_id and current.get("task", {}).get("status") == "active":
+        return {
+            "success": False, "channel": "simple_tasker", "detail": "verification failed; resume same session",
+            "output": current["task"].get("last_output", ""), "session_id": result.get("session_id"), "key_ref": result.get("key_ref"),
+        }
+    runner.archive()
+    return {
+        "success": True, "channel": "simple_tasker", "detail": "DeepSeek simple-tasker completed",
+        "output": result.get("summary", ""), "session_id": result.get("session_id"), "key_ref": result.get("key_ref"),
+    }
+
 def _dispatch_file(agent: str, prompt: str, project: str, dispatch_id: str = None, task_id: str = None) -> dict:
     """
     写入任务收件箱文件。
@@ -709,18 +834,24 @@ def _record_execution(project: str, task_id: str | None, result: dict) -> None:
     state = af.load_state(project)
     execution = {
         key: result[key]
-        for key in ("dispatch_id", "logical_owner", "executor", "driver", "status", "session_id", "fallback_errors")
+        for key in (
+            "dispatch_id", "logical_owner", "executor", "driver", "status", "session_id",
+            "pid", "returncode", "auth_profile", "key_ref", "attempts", "fallback_errors",
+        )
         if result.get(key) is not None
     }
     goal = state.get("goal") or {}
-    target = next((item for item in goal.get("completed", []) if item.get("id") == task_id), None)
+    workflow = state.get("workflow") or {}
+    target = next((item for item in workflow.get("completed", []) if item.get("id") == task_id), None)
+    if target is None:
+        target = next((item for item in goal.get("completed", []) if item.get("id") == task_id), None)
     if target is not None:
-        target["execution"] = execution
+        target["execution"] = {**target.get("execution", {}), **execution}
     elif task_id.endswith("-PLAN") and goal.get("id") and task_id == f"{goal['id']}-PLAN":
         goal["planning_execution"] = execution
         state["goal"] = goal
     elif state.get("task", {}).get("id") == task_id:
-        state["task"]["execution"] = execution
+        state["task"]["execution"] = {**state["task"].get("execution", {}), **execution}
     else:
         return
     af.save_state(project, state)
@@ -760,8 +891,25 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     failures = []
     for ch in channels:
         route = next((item for item in routes if item["driver"] == ch), {"agent": agent, "driver": ch}) if not force_channel else {"agent": agent, "driver": ch}
+        if ch in ("cursor_cli", "codex_cli", "simple_tasker") and task_id:
+            from . import supervisor
+
+            claim = supervisor.claim_task(project, task_id, dispatch_id, ch, agent)
+            if not claim["claimed"]:
+                result = {
+                    "success": False, "channel": ch,
+                    "detail": claim.get("detail", "same task already has a live executor"),
+                    "dispatch_id": dispatch_id, "task_id": task_id, "status": "skipped_running",
+                }
+                try:
+                    update_inbox_task(agent, dispatch_id, "failed", result["detail"])
+                except KeyError:
+                    pass
+                return result
         if ch == "brain":
             result = _dispatch_brain(agent, prompt, project)
+        elif ch == "simple_tasker":
+            result = _dispatch_simple_tasker(agent, prompt, project)
         elif ch == "cursor_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 300)
@@ -781,7 +929,7 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
             continue
 
         if result["success"]:
-            lifecycle = "completed" if ch in ("brain", "cursor_cli", "codex_cli", "cli") else "queued" if ch == "file" else "accepted"
+            lifecycle = "completed" if ch in ("brain", "simple_tasker", "cursor_cli", "codex_cli", "cli") else "queued" if ch == "file" else "accepted"
             if lifecycle != "queued" or failures:
                 try:
                     output = result.get("output", "")
@@ -803,7 +951,7 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     except KeyError:
         pass
     detail = "; ".join(f"{item['channel']}: {item['detail']}" for item in failures)
-    return {
+    result = {
         "success": False,
         "channel": "none",
         "detail": detail or "所有通道均失败",
@@ -812,6 +960,8 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
         "task_id": task_id,
         "status": "failed",
     }
+    _record_execution(project, task_id, result)
+    return result
 
 
 def read_inbox(agent: str) -> list:
