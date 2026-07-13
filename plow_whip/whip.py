@@ -6,21 +6,23 @@ whip.py — 耕田之鞭：主动驱动 AI agent 干活
   1. 扫描所有项目状态，找出当前轮到谁
   2. 检测"摸鱼"（stale）：轮到某 agent 但长时间无动作
   3. 生成可执行的"鞭策指令"（actionable prompt）
-  4. 支持 --daemon 持续监控并周期性鞭策
+  4. 使用 --once 供系统原生调度器周期执行
 
 用法:
     plow-whip whip                        # 扫一遍，输出谁该干活
     plow-whip whip --json                 # JSON 格式输出（给脚本用）
     plow-whip whip --agent codex          # 只鞭策指定 agent
     plow-whip whip --stale-minutes 30     # 超过30分钟算摸鱼
-    plow-whip whip --daemon               # 持续监控模式
+    plow-whip whip --once                 # 单次、加锁、适合系统调度
 """
 
 import json
 import os
 import hashlib
+import contextlib
+import io
 import sys
-import time
+import uuid
 from datetime import datetime, timedelta
 
 from . import agent_flow as af
@@ -30,6 +32,10 @@ from .dispatch import dispatch, available_channels
 # ── 诊断 ─────────────────────────────────────────────────────────────────────
 
 STALE_THRESHOLD_MINUTES = 60  # 默认超过60分钟算摸鱼
+WAKE_RETRY_MINUTES = 30  # 投递后任务仍无进展时允许再次续作
+QUEUED_WAKE_RETRY_MINUTES = 1  # 未实际执行的投递仅等待一个调度周期
+MAX_UNCHANGED_WAKE_ATTEMPTS = 3
+MAX_QUEUED_WAKE_ATTEMPTS = 6
 
 STATUS_LABEL = {
     "in_progress": "进行中",
@@ -115,6 +121,7 @@ def scan_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             "stale": stale,
             "staleness_info": _staleness_info(state),
             "next_action": state.get("next_action", ""),
+            "task": state.get("task", {}),
             "task_context": state.get("task_context", {}),
             "project_path": af.project_dir(name),
             "updated_at": state.get("updated_at", ""),
@@ -124,14 +131,87 @@ def scan_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
     return results
 
 
+def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
+    """Read only state-machine fields; never hydrate task text or collaboration context."""
+    projects_dir = af.get_projects_dir()
+    if not os.path.isdir(projects_dir):
+        return []
+
+    results = []
+    for name in sorted(os.listdir(projects_dir)):
+        pdir = os.path.join(projects_dir, name)
+        sf = af.state_file(name)
+        if name in ("by_rm", "archive") or not os.path.isdir(pdir) or not os.path.exists(sf):
+            continue
+        try:
+            with open(sf, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            results.append({
+                "project": name,
+                "current_agent": "unknown",
+                "status": "invalid_state",
+                "task_id": "",
+                "task_status": "unknown",
+                "updated_at": "",
+                "stale": True,
+                "needs_recovery": True,
+                "reason": f"state_error:{type(exc).__name__}",
+            })
+            continue
+
+        task = state.get("task") or {}
+        status = state.get("status", "unknown")
+        task_status = task.get("status", "unknown")
+        expected_status = {"active": "in_progress"}.get(task_status, task_status)
+        stale = _is_stale(state, stale_minutes)
+        mismatch = task_status != "unknown" and status != expected_status
+        results.append({
+            "project": name,
+            "current_agent": state.get("current_agent", "unknown"),
+            "status": status,
+            "task_id": task.get("id", ""),
+            "task_status": task_status,
+            "automation_enabled": bool(state.get("automation_enabled", False)),
+            "updated_at": state.get("updated_at", ""),
+            "stale": stale,
+            "needs_recovery": stale or mismatch,
+            "reason": "state_mismatch" if mismatch else "stale" if stale else "healthy",
+        })
+    return results
+
+
+def _load_recovery_project(project: str, stale_minutes: int, probe: dict) -> dict:
+    """Hydrate one anomalous project only after the zero-context probe trips."""
+    state = af.load_state(project)
+    af.ensure_project_path(project, state)
+    result = {
+        "project": project,
+        "current_agent": state.get("current_agent", "unknown"),
+        "status": state.get("status", "unknown"),
+        "phase": state.get("phase", ""),
+        "stale": _is_stale(state, stale_minutes),
+        "staleness_info": _staleness_info(state),
+        "next_action": state.get("next_action", ""),
+        "task": state.get("task", {}),
+        "task_context": state.get("task_context", {}),
+        "project_path": af.project_dir(project),
+        "updated_at": state.get("updated_at", ""),
+        "zellij_tab": state.get("zellij_tab"),
+        "needs_recovery": probe.get("needs_recovery", False),
+        "reason": probe.get("reason", ""),
+    }
+    return result
+
+
 def filter_by_agent(results: list, agent: str) -> list:
     """只保留指定 agent 的项目。"""
     return [r for r in results if r["current_agent"] == agent]
 
 
 def filter_active(results: list) -> list:
-    """只保留未完成的项目。"""
-    return [r for r in results if r["status"] != "done"]
+    """只保留可继续工作的项目；done/blocked 都不可自动派发。"""
+    return [r for r in results if r["status"] not in ("done", "blocked")]
 
 
 # ── 鞭策指令生成 ──────────────────────────────────────────────────────────────
@@ -164,15 +244,8 @@ def generate_whip_prompt(result: dict) -> str:
 
     lines.append(f"请立即执行: {next_action}")
     lines.append("")
-    lines.append("先读这些文件，不要要求上游粘贴全文:")
-    lines.append(f"  {project_path}/collab/CONVENTIONS.md")
-    lines.append(f"  {project_path}/collab/AGENT_STATE.json")
-    lines.append(f"  {project_path}/collab/AGENT_COMMS.md")
-    lines.append(f"  {project_path}/collab/memory/NEXT_ACTION.md")
-    lines.append("")
-    lines.append(f"快速恢复命令:")
-    lines.append(f"  plow-whip --project {project} status")
-    lines.append(f"  plow-whip --project {project} handoff --output '...' --next '...'")
+    lines.append("唯一启动命令:")
+    lines.append(f"  plow-whip --project {project} start --agent {agent} --json")
 
     return "\n".join(lines)
 
@@ -186,6 +259,36 @@ def _wake_hash(result: dict) -> str:
         "project_path": result.get("project_path") or result.get("task_context", {}).get("project_path"),
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _wake_lease_active(state: dict, wake_hash: str, retry_minutes: int = WAKE_RETRY_MINUTES) -> bool:
+    """Suppress duplicate wakes briefly, but never strand an unfinished task forever."""
+    if state.get("last_wake_hash") != wake_hash:
+        return False
+    last_woken = _parse_updated_at(state.get("last_woken_at", ""))
+    if last_woken is None:
+        return False
+    if state.get("last_wake_status") in ("queued", "failed"):
+        retry_minutes = min(retry_minutes, QUEUED_WAKE_RETRY_MINUTES)
+    return datetime.now().astimezone() - last_woken < timedelta(minutes=retry_minutes)
+
+
+def _record_wake(project: str, wake_hash: str, result: dict, dispatch_id: str) -> bool:
+    """Merge wake metadata without allowing a concurrent Agent write to be lost."""
+    for _ in range(3):
+        state = af.load_state(project)
+        same_action = state.get("last_wake_hash") == wake_hash
+        state["last_wake_hash"] = wake_hash
+        state["last_dispatch_id"] = result.get("dispatch_id", dispatch_id)
+        state["last_wake_status"] = result.get("status", "accepted")
+        state["last_woken_at"] = datetime.now().isoformat(timespec="seconds")
+        state["wake_count"] = int(state.get("wake_count", 0)) + 1 if same_action else 1
+        try:
+            af.write_state(project, state, touch=False)
+            return True
+        except RuntimeError:
+            continue
+    return False
 
 
 def generate_notification(result: dict) -> str:
@@ -204,7 +307,6 @@ def cmd_whip(args):
     target_agent = getattr(args, "agent", None)
     as_json = getattr(args, "json", False)
     daemon = getattr(args, "daemon", False)
-    daemon_interval = getattr(args, "interval", 300)  # 默认5分钟
     crack = getattr(args, "crack", False)
     auto_crack = getattr(args, "auto_crack", False)
     force_channel = getattr(args, "channel", None)
@@ -212,8 +314,23 @@ def cmd_whip(args):
     auto_rotate = getattr(args, 'auto_rotate', False)
     use_brain = getattr(args, 'brain', False)
 
-    if auto_crack:
-        _auto_crack_loop(stale_minutes, target_agent, daemon_interval, force_channel, auto_rotate=auto_rotate, use_brain=use_brain)
+    if getattr(args, "once", False) or auto_crack or daemon:
+        if auto_crack or daemon:
+            print("warning: continuous whip flags are deprecated; install the native scheduler for repetition", file=sys.stderr)
+        payload = run_once(
+            stale_minutes=stale_minutes,
+            target_agent=target_agent,
+            crack=crack or auto_crack,
+            force_channel=force_channel,
+            auto_rotate=auto_rotate,
+            force=getattr(args, "force", False),
+            use_brain=use_brain,
+            opt_in_only=getattr(args, "opt_in_only", False),
+        )
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"whip once: {payload['status']} ({len(payload.get('projects', []))} projects)")
         return
 
     results = scan_all_projects(stale_minutes)
@@ -223,7 +340,10 @@ def cmd_whip(args):
         results = filter_by_agent(results, target_agent)
 
     if not results:
-        print("所有项目已完成，无人需要鞭策。")
+        if as_json:
+            print("[]")
+        else:
+            print("所有项目已完成，无人需要鞭策。")
         return
 
     force = getattr(args, "force", False)
@@ -283,130 +403,158 @@ def _print_whip_report(results: list):
         af.notify(f"{stale_count} 个项目需要鞭策!", ring=True)
 
 
-def _crack(results: list, force_channel: str = None, force: bool = False, use_brain: bool = False):
+def _crack(results: list, force_channel: str = None, force: bool = False, use_brain: bool = False, quiet: bool = False):
     """
     抽鞭子！将任务投递给每个摸鱼的 agent。
     对每个 stale 项目，生成 prompt 并通过 dispatch 投递。
     """
-    stale = [r for r in results if r.get("stale") or force]
+    stale = [r for r in results if r.get("stale") or r.get("needs_recovery") or force]
     if not stale:
-        print("没有摸鱼项目，无需抽鞭。")
-        return
+        if not quiet:
+            print("没有摸鱼项目，无需抽鞭。")
+        return []
 
-    print(f"\n  抽鞭！目标: {len(stale)} 个摸鱼项目\n")
+    if not quiet:
+        print(f"\n  抽鞭！目标: {len(stale)} 个摸鱼项目\n")
+    outcomes = []
     for r in stale:
         agent = r["current_agent"]
         project = r["project"]
         wake_hash = _wake_hash(r)
         state = af.load_state(project)
-        if not force and state.get("last_wake_hash") == wake_hash:
-            print(f"  [{project}] -> {agent} SKIP: same task already woken")
+        retry_limit = (
+            MAX_QUEUED_WAKE_ATTEMPTS
+            if state.get("last_wake_status") in ("queued", "failed")
+            else MAX_UNCHANGED_WAKE_ATTEMPTS
+        )
+        if (
+            not force
+            and state.get("last_wake_hash") == wake_hash
+            and int(state.get("wake_count", 0)) >= retry_limit
+        ):
+            outcomes.append({"project": project, "agent": agent, "status": "paused_retry_limit"})
+            continue
+        if not force and _wake_lease_active(state, wake_hash):
+            outcomes.append({"project": project, "agent": agent, "status": "skipped_duplicate"})
+            if not quiet:
+                print(f"  [{project}] -> {agent} SKIP: same task already woken")
             continue
         prompt = generate_whip_prompt(r)
+        dispatch_id = f"DP-{uuid.uuid4().hex[:12]}"
 
         # 显示可用通道
-        channels = available_channels(agent)
+        channels = available_channels(agent, project)
         channel_str = ", ".join(channels)
-        print(f"  [{project}] -> {agent} (通道: {channel_str})")
+        if not quiet:
+            print(f"  [{project}] -> {agent} (通道: {channel_str})")
 
         # 投递（如果项目绑定了 zellij tab，精准投递）
         zellij_tab = r.get("zellij_tab")
         dispatch_kwargs = {"target_tab": zellij_tab}
         if use_brain:
             dispatch_kwargs["use_brain"] = True
-        result = dispatch(agent, project, prompt, force_channel, **dispatch_kwargs)
+        result = dispatch(agent, project, prompt, force_channel, dispatch_id=dispatch_id, **dispatch_kwargs)
         status = "OK" if result["success"] else "FAIL"
-        print(f"    [{status}] {result['channel']}: {result['detail']}")
+        if not quiet:
+            print(f"    [{status}] {result['channel']}: {result['detail']}")
+        outcomes.append({"project": project, "agent": agent, **result})
         if result["success"]:
-            state["last_wake_hash"] = wake_hash
-            state["last_woken_at"] = datetime.now().isoformat(timespec="seconds")
-            state["wake_count"] = int(state.get("wake_count", 0)) + 1
-            af.write_state(project, state, touch=False)
-        print()
+            if not _record_wake(project, wake_hash, result, dispatch_id):
+                outcomes[-1]["wake_recorded"] = False
+        if not quiet:
+            print()
+    return outcomes
 
 
-def _auto_crack_loop(stale_minutes, target_agent, interval, force_channel, auto_rotate=False, use_brain=False):
-    """
-    自动挥舞模式：持续扫描，发现摸鱼就自动抽鞭。
-    这是真正的"耕田之鞭" — 不需要人介入，自动驱动 agent 干活。
-    """
-    print("  耕田之鞭 — 自动挥舞模式")
-    print(f"   摸鱼阈值: {stale_minutes} 分钟")
-    print(f"   轮询间隔: {interval} 秒")
-    if target_agent:
-        print(f"   目标: 只鞭策 {target_agent}")
-    if force_channel:
-        print(f"   通道: 强制 {force_channel}")
-    if auto_rotate:
-        print(f"   ✂️  自动轮转: 已启用")
-    if use_brain:
-        print(f"   🧠 DeepSeek Brain: 已启用")
-    print("   Ctrl+C 收起鞭子\n")
-
+def _pid_alive(pid):
     try:
-        while True:
-            results = scan_all_projects(stale_minutes)
-            results = filter_active(results)
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _acquire_once_lock():
+    run_dir = os.path.join(af.CONFIG_DIR, "run")
+    lock_dir = os.path.join(run_dir, "whip.lock")
+    os.makedirs(run_dir, exist_ok=True)
+    try:
+        os.mkdir(lock_dir)
+    except FileExistsError:
+        pid_path = os.path.join(lock_dir, "pid")
+        try:
+            with open(pid_path, encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            pid = None
+        if pid and _pid_alive(pid):
+            return None
+        if os.path.isfile(pid_path):
+            os.unlink(pid_path)
+        try:
+            os.rmdir(lock_dir)
+            os.mkdir(lock_dir)
+        except OSError:
+            return None
+    with open(os.path.join(lock_dir, "pid"), "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    return lock_dir
+
+
+def _release_once_lock(lock_dir):
+    if not lock_dir:
+        return
+    pid_path = os.path.join(lock_dir, "pid")
+    if os.path.isfile(pid_path):
+        os.unlink(pid_path)
+    try:
+        os.rmdir(lock_dir)
+    except OSError:
+        pass
+
+
+def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=False,
+             force_channel=None, auto_rotate=False, force=False, use_brain=False, opt_in_only=False):
+    """Run a zero-context probe; hydrate task context only for explicit recovery."""
+    lock_dir = _acquire_once_lock()
+    if not lock_dir:
+        return {"status": "skipped_already_running", "projects": [], "dispatches": []}
+    try:
+        rotations = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            if auto_rotate:
+                for project in af.list_collab_projects():
+                    summary = af.auto_rotate_all_agents(project)
+                    if summary["agents"] or summary["files"]:
+                        rotations.append(summary)
+            results = filter_active(probe_all_projects(stale_minutes))
             if target_agent:
                 results = filter_by_agent(results, target_agent)
-
-            # Auto-rotate: check all active projects' sessions + collab files
-            if auto_rotate:
-                for r in results:
-                    af.auto_rotate_all_agents(r["project"])
-
-            stale = [r for r in results if r["stale"]]
-            if stale:
-                now = datetime.now().strftime("%H:%M:%S")
-                print(f"\n[{now}] 发现 {len(stale)} 个摸鱼项目，抽鞭中...")
-                _crack(stale, force_channel, use_brain=use_brain)
-            else:
-                now = datetime.now().strftime("%H:%M:%S")
-                print(f"[{now}] 暂无摸鱼项目，鞭子休息中")
-
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\n  耕田之鞭已收起")
-
-
-def _daemon_loop(stale_minutes, target_agent, as_json, interval, auto_rotate=False):
-    """持续监控模式。"""
-    print("  耕田之鞭 — 持续监控模式")
-    print(f"   摸鱼阈值: {stale_minutes} 分钟")
-    print(f"   轮询间隔: {interval} 秒")
-    if target_agent:
-        print(f"   目标: 只鞭策 {target_agent}")
-    if auto_rotate:
-        print(f"   ✂️  自动轮转: 已启用")
-    print("   Ctrl+C 退出\n")
-
-    try:
-        while True:
-            results = scan_all_projects(stale_minutes)
-            results = filter_active(results)
-            if target_agent:
-                results = filter_by_agent(results, target_agent)
-
-            # Auto-rotate: check all active projects' sessions + collab files
-            if auto_rotate:
-                for r in results:
-                    af.auto_rotate_all_agents(r["project"])
-
-            stale = [r for r in results if r["stale"]]
-            if stale:
-                if as_json:
-                    print(json.dumps(stale, ensure_ascii=False, indent=2))
-                else:
-                    now = datetime.now().strftime("%H:%M:%S")
-                    print(f"\n[{now}] 发现 {len(stale)} 个摸鱼项目:")
-                    for r in stale:
-                        msg = generate_notification(r)
-                        print(f"   {msg}")
-                        af.notify(msg, ring=False)
-            else:
-                now = datetime.now().strftime("%H:%M:%S")
-                print(f"[{now}] 暂无摸鱼项目")
-
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\n  耕田之鞭已收起")
+            recovery_probes = [r for r in results if r.get("needs_recovery") or force]
+            if opt_in_only and not force:
+                recovery_probes = [r for r in recovery_probes if r.get("automation_enabled")]
+            recovery = [
+                _load_recovery_project(r["project"], stale_minutes, r)
+                for r in recovery_probes
+            ] if crack else []
+            dispatches = _crack(recovery, force_channel, force=force, use_brain=use_brain, quiet=True) if crack else []
+        payload = {
+            "status": "ok",
+            "mode": "probe",
+            "context_loaded": False,
+            "model_invoked": False,
+            "ran_at": datetime.now().isoformat(timespec="seconds"),
+            "projects": results,
+            "stale_projects": [r["project"] for r in results if r.get("stale")],
+            "recovery_projects": [r["project"] for r in recovery_probes],
+            "dispatches": dispatches,
+            "rotations": rotations,
+        }
+        try:
+            os.makedirs(af.CONFIG_DIR, exist_ok=True)
+            af.atomic_write_json(os.path.join(af.CONFIG_DIR, "scheduler-last-run.json"), payload)
+        except OSError:
+            pass
+        return payload
+    finally:
+        _release_once_lock(lock_dir)

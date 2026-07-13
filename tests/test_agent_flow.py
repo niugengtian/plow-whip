@@ -1,6 +1,7 @@
 """Tests for plow-whip agent_flow engine."""
 
 import json
+import copy
 import os
 import shutil
 import tempfile
@@ -14,12 +15,11 @@ from plow_whip.agent_flow import (
     cmd_agent,
     cmd_configure,
     cmd_new,
-    build_context_pack,
+    build_start_pack,
     build_doctor_report,
     build_memory_budget,
     cmd_doctor,
     format_memory_budget,
-    format_context_pack,
     cmd_handoff,
     cmd_init,
     cmd_list,
@@ -28,6 +28,8 @@ from plow_whip.agent_flow import (
     cmd_sessions_overview,
     cmd_status,
     cmd_sync,
+    conventions_agent_file,
+    conventions_human_file,
     load_config,
     load_state,
     save_config,
@@ -64,6 +66,10 @@ class PlowWhipTestBase(unittest.TestCase):
 
 
 class TestConfigure(PlowWhipTestBase):
+    def test_project_name_cannot_escape_projects_root(self):
+        with self.assertRaises(ValueError):
+            af.project_dir("../escape")
+
     def test_configure_creates_config(self):
         os.remove(self.config_file)
         args = FakeArgs(projects_dir=self.projects_dir, agents=["qoder", "codex"])
@@ -82,41 +88,49 @@ class TestInit(PlowWhipTestBase):
         self.assertTrue(os.path.exists(os.path.join(collab_dir, "AGENT_COMMS.md")))
         self.assertTrue(os.path.exists(os.path.join(collab_dir, "AGENTS.md")))
         self.assertTrue(os.path.exists(os.path.join(collab_dir, "CONVENTIONS.md")))
+        self.assertTrue(os.path.exists(os.path.join(collab_dir, "CONVENTIONS.agent.md")))
         for agent in ("qoder", "codex", "cursor"):
             self.assertTrue(os.path.exists(os.path.join(collab_dir, "conversations", agent, "current.md")))
-        for filename in ("PROJECT.md", "CURRENT_STATUS.md", "NEXT_ACTION.md", "ROADMAP.md", "DECISIONS.md"):
+        for filename in ("DECISIONS.md",):
             self.assertTrue(os.path.exists(os.path.join(collab_dir, "memory", filename)))
-        self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "adr")))
         self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "sessions")))
-        self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "sprints", "active")))
-        self.assertTrue(os.path.isdir(os.path.join(collab_dir, "memory", "sprints", "archive")))
 
 
     def test_init_writes_subagent_boundary_rule(self):
         cmd_init("TestProject")
-        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
-        with open(conventions_path, encoding="utf-8") as f:
-            conventions = f.read()
-        self.assertIn("子智能体边界", conventions)
-        self.assertIn("不允许自行创建、调用、委派或并行启动子智能体", conventions)
-        self.assertIn("D-009", conventions)
-
+        agent_path = os.path.join(self.projects_dir, "TestProject", "collab", "AGENT_PROTOCOL.json")
+        human_path = os.path.join(self.projects_dir, "TestProject", "collab", "HANDBOOK.zh-CN.md")
+        with open(agent_path, encoding="utf-8") as f:
+            agent = json.load(f)
+        with open(human_path, encoding="utf-8") as f:
+            human = f.read()
+        self.assertIn("R004", agent["global_rules"])
+        self.assertIn("子智能体", human)
 
     def test_init_writes_project_boundary_rule(self):
         cmd_init("TestProject")
-        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
-        with open(conventions_path, encoding="utf-8") as f:
+        human_path = os.path.join(self.projects_dir, "TestProject", "collab", "HANDBOOK.zh-CN.md")
+        with open(human_path, encoding="utf-8") as f:
             conventions = f.read()
-        self.assertIn("项目边界原则", conventions)
-        self.assertIn("只能读取和修改当前项目根目录内的文件", conventions)
-        self.assertIn("D-010", conventions)
+        self.assertIn("项目根目录", conventions)
 
     def test_init_creates_valid_state(self):
         cmd_init("TestProject")
         state = load_state("TestProject")
         self.assertEqual(state["current_agent"], "qoder")
-        self.assertEqual(state["task_context"]["project_path"], os.path.join(self.projects_dir, "TestProject"))
-        self.assertEqual(state["agents"], ["qoder", "codex", "cursor"])
+        self.assertNotIn("project_path", state["task_context"])
+        self.assertEqual(af.get_project_agents("TestProject"), ["qoder", "codex", "cursor"])
+
+    def test_stale_state_writer_cannot_overwrite_newer_agent_work(self):
+        cmd_init("TestProject")
+        first = load_state("TestProject")
+        stale = copy.deepcopy(first)
+        first["task"]["next_action"] = "newer work"
+        af.save_state("TestProject", first)
+        stale["task"]["next_action"] = "stale overwrite"
+        with self.assertRaises(RuntimeError):
+            af.save_state("TestProject", stale)
+        self.assertEqual(load_state("TestProject")["task"]["next_action"], "newer work")
 
     def test_init_writes_agent_manifest_from_config(self):
         save_config({
@@ -130,22 +144,25 @@ class TestInit(PlowWhipTestBase):
         cmd_init("TestProject")
         state = load_state("TestProject")
         self.assertEqual(state["current_agent"], "planner")
-        self.assertEqual(state["agent_meta"]["builder"]["assignment"], "Build work")
+        self.assertEqual(af.load_protocol("TestProject")["agents"]["builder"]["assignment"], "Build work")
         with open(os.path.join(self.projects_dir, "TestProject", "collab", "AGENTS.md"), encoding="utf-8") as f:
             manifest = f.read()
-        self.assertIn("| `planner` | PM | Plan work |", manifest)
-        self.assertIn("| `builder` | Engineer | Build work |", manifest)
+        self.assertIn("| `planner` | pm | file | — | Plan work |", manifest)
+        self.assertIn("| `builder` | engineer | file | — | Build work |", manifest)
 
     def test_agent_set_updates_config_and_project(self):
         cmd_init("TestProject")
         args = FakeArgs(action="set", name="reviewer", role="Reviewer", assignment="Review work")
         cmd_agent(args, project="TestProject")
         cfg = load_config()
-        self.assertIn("reviewer", cfg["agents"])
-        self.assertEqual(cfg["agent_meta"]["reviewer"]["assignment"], "Review work")
-        state = load_state("TestProject")
-        self.assertIn("reviewer", state["agents"])
-        self.assertEqual(state["agent_meta"]["reviewer"]["role"], "Reviewer")
+        self.assertNotIn("reviewer", cfg["agents"])
+        protocol = af.load_protocol("TestProject")
+        self.assertIn("reviewer", protocol["agents"])
+        self.assertEqual(protocol["agents"]["reviewer"]["role"], "Reviewer")
+        current = os.path.join(self.projects_dir, "TestProject", "collab", "conversations", "reviewer", "current.md")
+        self.assertTrue(os.path.exists(current))
+        with open(current, encoding="utf-8") as f:
+            self.assertIn("**AI:** Reviewer", f.read())
 
     def test_init_idempotent(self):
         cmd_init("TestProject")
@@ -161,17 +178,15 @@ class TestInit(PlowWhipTestBase):
 
 
 class TestContextPack(PlowWhipTestBase):
-    def test_context_pack_contains_minimal_state_and_targeted_messages(self):
+    def test_context_pack_alias_uses_start_payload(self):
         cmd_init("TestProject")
         af.append_comms("TestProject", "@cursor please ignore this")
         af.append_comms("TestProject", "@codex please implement the tiny context pack")
-        pack = build_context_pack("TestProject", agent="codex")
-        rendered = format_context_pack(pack)
+        pack = build_start_pack("TestProject", agent="codex")
         self.assertEqual(pack["agent"], "codex")
-        self.assertIn("qoder starts requirements analysis", rendered)
-        self.assertIn("@codex please implement", rendered)
-        self.assertNotIn("@cursor please ignore", rendered)
-        self.assertIn("CONVENTIONS.md", rendered)
+        self.assertIn("@codex please implement", "\n".join(pack["messages"]))
+        self.assertNotIn("@cursor please ignore", "\n".join(pack["messages"]))
+        self.assertNotIn("read_first", pack)
 
 
 class TestDoctor(PlowWhipTestBase):
@@ -187,6 +202,43 @@ class TestDoctor(PlowWhipTestBase):
         self.assertTrue(report["ok"])
         self.assertTrue(os.path.exists(os.path.join(self.projects_dir, "NeedsPlowWhip", "collab", "AGENT_STATE.json")))
         self.assertTrue(os.path.exists(os.path.join(self.projects_dir, "NeedsPlowWhip", "collab", "CONVENTIONS.md")))
+        self.assertTrue(os.path.exists(os.path.join(self.projects_dir, "NeedsPlowWhip", "collab", "CONVENTIONS.agent.md")))
+
+    def test_doctor_repair_enforces_rotation_by_default(self):
+        cmd_init("TestProject")
+        with open(af.comms_file("TestProject"), "w", encoding="utf-8") as f:
+            f.write("# board\n\n")
+            for i in range(5):
+                body = "\n".join(f"line {n}" for n in range(20))
+                f.write(f"### [codex] 2026-07-12 — Msg {i}\n\n{body}\n\n")
+
+        cmd_doctor("TestProject", FakeArgs(repair=True, skip_rotate=False, json=True))
+
+        self.assertFalse(af.build_rotation_health("TestProject")["needs_enforcement"])
+
+    def test_doctor_reports_state_drift_and_repair_normalizes_it(self):
+        cmd_init("TestProject")
+        with open(af.state_file("TestProject"), encoding="utf-8") as f:
+            state = json.load(f)
+        state["next_action"] = "wrong duplicate"
+        with open(af.state_file("TestProject"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        report = build_doctor_report("TestProject")
+        self.assertFalse(report["ok"])
+        self.assertIn("derived state fields drifted", report["issues"][0])
+        af.cmd_repair("TestProject", FakeArgs(json=True))
+        self.assertTrue(build_doctor_report("TestProject")["ok"])
+
+    def test_doctor_reports_corrupt_protocol_without_crashing(self):
+        cmd_init("TestProject")
+        with open(af.protocol_file("TestProject"), "w", encoding="utf-8") as f:
+            f.write("{")
+        report = build_doctor_report("TestProject")
+        self.assertFalse(report["ok"])
+        self.assertIn("invalid AGENT_PROTOCOL.json", report["issues"][0])
+        af.cmd_repair("TestProject", FakeArgs(json=True))
+        pack = af.build_start_pack("TestProject", "qoder")
+        self.assertEqual(pack["action_required"], "fix_canonical_json")
 
 
 class TestStatus(PlowWhipTestBase):
@@ -276,6 +328,8 @@ class TestMemoryBudget(PlowWhipTestBase):
         self.assertIn("Hot:", rendered)
         self.assertIn("Warm:", rendered)
         self.assertIn("AGENT_STATE.json", rendered)
+        self.assertIn("Machine truth", rendered)
+        self.assertNotIn("AGENT_PROTOCOL.json", [item["file"] for item in report["hot"]["files"]])
         self.assertTrue(report["hot"]["tokens"] > 0)
 
 
@@ -286,36 +340,51 @@ class TestSync(PlowWhipTestBase):
 
     def test_sync_recreates_conventions(self):
         cmd_init("TestProject")
-        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
-        os.remove(conventions_path)
-        self.assertFalse(os.path.exists(conventions_path))
+        agent_path = conventions_agent_file("TestProject")
+        human_path = conventions_human_file("TestProject")
+        os.remove(agent_path)
+        os.remove(human_path)
+        self.assertFalse(os.path.exists(agent_path))
         cmd_sync()
-        self.assertTrue(os.path.exists(conventions_path))
+        self.assertTrue(os.path.exists(agent_path))
+        self.assertTrue(os.path.exists(human_path))
+
+    def test_agent_change_syncs_to_human(self):
+        cmd_init("TestProject")
+        data = af.load_protocol("TestProject")
+        data["project_rules"]["R101"] = {"summary": "Probe rule.", "summary_zh": "同步探测规则。"}
+        af.proto.save(af.project_dir("TestProject"), data)
+        af.proto.write_handbook(af.project_dir("TestProject"), data)
+        human_path = af.handbook_file("TestProject")
+        with open(human_path, encoding="utf-8") as f:
+            human = f.read()
+        self.assertIn("同步探测规则", human)
 
 
 
     def test_sync_preserves_project_principles(self):
         cmd_init("TestProject")
-        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
-        with open(conventions_path, "a", encoding="utf-8") as f:
-            f.write("\n## Project Local Rule\n\n- Keep this project-only rule.\n")
+        data = af.load_protocol("TestProject")
+        data["project_rules"]["R101"] = {"summary": "Keep this project-only rule."}
+        af.proto.save(af.project_dir("TestProject"), data)
         cmd_sync()
-        with open(conventions_path, encoding="utf-8") as f:
+        with open(af.handbook_file("TestProject"), encoding="utf-8") as f:
             conventions = f.read()
-        self.assertIn("plow-whip:global-principles:start", conventions)
         self.assertIn("Keep this project-only rule", conventions)
 
     def test_sync_migrates_legacy_conventions_without_overwriting(self):
         cmd_init("TestProject")
-        conventions_path = os.path.join(self.projects_dir, "TestProject", "collab", "CONVENTIONS.md")
-        with open(conventions_path, "w", encoding="utf-8") as f:
+        human_path = conventions_human_file("TestProject")
+        agent_path = conventions_agent_file("TestProject")
+        os.remove(agent_path)
+        with open(human_path, "w", encoding="utf-8") as f:
             f.write("# Legacy conventions\n\n- Legacy project rule.\n")
         cmd_sync()
-        with open(conventions_path, encoding="utf-8") as f:
+        self.assertTrue(os.path.exists(agent_path))
+        with open(human_path, encoding="utf-8") as f:
             conventions = f.read()
-        self.assertIn("plow-whip:global-principles:start", conventions)
-        self.assertIn("Legacy project rule", conventions)
-        self.assertIn("项目原则", conventions)
+        self.assertIn("HANDBOOK.zh-CN.md", conventions)
+        self.assertTrue(os.path.exists(af.protocol_file("TestProject")))
 
 
 class TestList(PlowWhipTestBase):

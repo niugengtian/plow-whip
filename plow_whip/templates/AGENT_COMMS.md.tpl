@@ -1,12 +1,12 @@
 # Agent Message Board — {PROJECT_NAME}
 
-> Leave messages for other agents. Keep the 3 most recent; archive older ones.
+> Leave messages for other agents. Keep the 5 most recent blocks; archive older ones.
 
 ---
 
 ## Recent Messages
 
-> Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.
+> Framework writes use `### [agent]` blocks. The latest 5 blocks stay Warm.
 
 ---
 

@@ -221,7 +221,7 @@ class QoderSessionManager:
         recent_lines = lines[split_line:]
         
         # 生成归档文件名
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         task_id = task_file.stem  # e.g., "task-037"
         archive_name = f"{task_id}_{timestamp}.jsonl"
         archive_dir = task_file.parent / "archive"
@@ -576,7 +576,7 @@ class QoderSessionManager:
             by_rm_dir = file_path.parent.parent.parent / "by_rm"
         
         by_rm_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         dest = by_rm_dir / f"{file_path.stem}_{timestamp}{file_path.suffix}"
         file_path.rename(dest)
     

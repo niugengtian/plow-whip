@@ -1,0 +1,17 @@
+{
+  "project": "plow-whip",
+  "task_id": "G-20260713133634-M1",
+  "title": "无人值守只读验收 README",
+  "final_output": "POSIX sh 只读验收通过：README.md 第一行为 # plow-whip（耕田之鞭），grep -q plow-whip 退出码 0；未修改业务代码。",
+  "archived_at": "2026-07-13T13:46:20",
+  "cli_sessions": {
+    "codex_cli": {
+      "session_id": "019f5a02-79a3-76c1-8b3d-2d66efd5b5de",
+      "status": "archived",
+      "created_at": "2026-07-13T13:45:42",
+      "auth_profile": "desktop",
+      "model": null,
+      "archived_at": "2026-07-13T13:46:20"
+    }
+  }
+}

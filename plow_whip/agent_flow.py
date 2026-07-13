@@ -28,7 +28,7 @@ from datetime import datetime
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip")
+CONFIG_DIR = os.environ.get("PLOW_WHIP_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".plow-whip"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 ROTATE_MAX_LINES = 100
@@ -38,19 +38,12 @@ HOT_TOKEN_BUDGET = 1200
 WARM_TOKEN_BUDGET = 4000
 HOT_MEMORY_FILES = [
     "AGENT_STATE.json",
-    "memory/NEXT_ACTION.md",
-    "memory/CURRENT_STATUS.md",
 ]
+MACHINE_RULE_FILES = ["AGENT_PROTOCOL.json"]
 WARM_MEMORY_FILES = [
     "AGENT_COMMS.md",
-    "memory/ROADMAP.md",
-    "memory/DECISIONS.md",
 ]
 MEMORY_TEMPLATE_MAP = [
-    ("PROJECT.md.tpl", "PROJECT.md"),
-    ("CURRENT_STATUS.md.tpl", "CURRENT_STATUS.md"),
-    ("NEXT_ACTION.md.tpl", "NEXT_ACTION.md"),
-    ("ROADMAP.md.tpl", "ROADMAP.md"),
     ("DECISIONS.md.tpl", "DECISIONS.md"),
 ]
 
@@ -69,8 +62,10 @@ TRACKED_COLLAB_FILES = [
     "memory/ROADMAP.md",
 ]
 
-GLOBAL_CONVENTIONS_BEGIN = "<!-- plow-whip:global-principles:start -->"
-GLOBAL_CONVENTIONS_END = "<!-- plow-whip:global-principles:end -->"
+from . import rotation as rot
+from . import protocol as proto
+from . import routing
+from .io_utils import atomic_write_json, atomic_write_text, file_lock
 
 # Agent mention patterns for activity detection
 AGENT_PATTERNS = ["cursor", "cursor_cli", "qoder", "qoder_cli", "codex", "codex_cli", "@cursor", "@qoder", "@codex", "handoff", "plow-whip"]
@@ -107,10 +102,7 @@ def load_config():
 
 
 def save_config(cfg):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    atomic_write_json(CONFIG_FILE, cfg)
 
 
 def get_projects_dir():
@@ -125,7 +117,10 @@ def get_projects_dir():
 
 def get_agents():
     cfg = load_config()
-    return cfg.get("agents", DEFAULT_AGENTS)
+    agents = cfg.get("agents", DEFAULT_AGENTS)
+    for agent in agents:
+        validate_identifier(agent, "agent")
+    return agents
 
 
 def get_agent_meta(agent=None):
@@ -145,7 +140,16 @@ def get_agent_assignment(agent):
 # ── Path Resolution ────────────────────────────────────────────────────────────
 
 def project_dir(project):
+    validate_identifier(project, "project")
     return os.path.join(get_projects_dir(), project)
+
+
+def validate_identifier(value, label="identifier"):
+    if not isinstance(value, str) or not value.strip() or value in (".", ".."):
+        raise ValueError(f"invalid {label}: {value!r}")
+    if "\x00" in value or "/" in value or "\\" in value:
+        raise ValueError(f"invalid {label}: path separators are not allowed")
+    return value
 
 
 def project_collab_dir(project):
@@ -166,6 +170,35 @@ def state_file(project):
 
 def comms_file(project):
     return os.path.join(project_collab_dir(project), "AGENT_COMMS.md")
+
+
+def conventions_agent_file(project):
+    return os.path.join(project_collab_dir(project), "CONVENTIONS.agent.md")
+
+
+def conventions_human_file(project):
+    return os.path.join(project_collab_dir(project), "CONVENTIONS.md")
+
+
+def protocol_file(project):
+    return proto.protocol_path(project_dir(project))
+
+
+def handbook_file(project):
+    return proto.handbook_path(project_dir(project))
+
+
+def load_protocol(project):
+    return proto.load(project_dir(project))
+
+
+def get_project_agents(project):
+    if os.path.exists(protocol_file(project)):
+        try:
+            return proto.enabled_agents(load_protocol(project))
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+    return get_agents()
 
 
 # ── Templates ──────────────────────────────────────────────────────────────────
@@ -195,56 +228,29 @@ def write_rendered(target_path, template_name, project):
     return False
 
 
-def extract_global_conventions_block(content):
-    """Return the marked global conventions block, including markers."""
-    start = content.find(GLOBAL_CONVENTIONS_BEGIN)
-    end = content.find(GLOBAL_CONVENTIONS_END)
-    if start == -1 or end == -1 or end < start:
-        return None
-    end += len(GLOBAL_CONVENTIONS_END)
-    return content[start:end]
+def _read_text_file(path, default=""):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return default
 
 
-def write_conventions(target_path, project, sync_global_only=False):
-    """Write CONVENTIONS.md.
-
-    Init writes the full template. Sync updates only the marked global block so
-    project-specific principles outside the block remain local and take priority.
-    Legacy unmarked files are migrated without dropping their existing content.
-    """
-    rendered = render_template("CONVENTIONS.md.tpl", project)
-    if rendered is None:
-        return False
-
-    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-    if not sync_global_only or not os.path.exists(target_path):
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.write(rendered)
-        return True
-
-    with open(target_path, encoding="utf-8") as f:
-        current = f.read()
-
-    new_block = extract_global_conventions_block(rendered)
-    old_block = extract_global_conventions_block(current)
-    if not new_block:
-        return False
-
-    if old_block:
-        updated = current.replace(old_block, new_block, 1)
-    else:
-        preserved = current.rstrip()
-        updated = (
-            rendered.rstrip()
-            + "\n\n## 项目原则（从旧 CONVENTIONS.md 保留，优先于全局原则）\n\n"
-            + "> 这是 sync 从未分层的旧文件中保留下来的项目内容。请按项目需要整理；本区内容优先于上方全局原则。\n\n"
-            + preserved
-            + "\n"
-        )
-
-    with open(target_path, "w", encoding="utf-8") as f:
-        f.write(updated)
-    return updated != current
+def _write_compat_conventions(project):
+    """Keep legacy filenames as tiny pointers; agents read AGENT_PROTOCOL.json."""
+    agent_text = (
+        "# Agent conventions compatibility pointer\n\n"
+        "Canonical machine rules: `AGENT_PROTOCOL.json`.\n"
+        f"Startup: `plow-whip --project {project} start --agent <agent> --json`.\n"
+    )
+    human_text = (
+        "# 多 Agent 协作约定\n\n"
+        "完整中文说明见 `HANDBOOK.zh-CN.md`；本文件仅为旧工具兼容入口。\n"
+    )
+    for path, content in ((conventions_agent_file(project), agent_text), (conventions_human_file(project), human_text)):
+        if _read_text_file(path) != content:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
 
 
 # ── Notifications ──────────────────────────────────────────────────────────────
@@ -270,24 +276,46 @@ def notify(message, ring=False):
 # ── State Read/Write ───────────────────────────────────────────────────────────
 
 def default_state(project):
-    agents = get_agents()
+    agents = get_project_agents(project)
     first_agent = agents[0] if agents else "agent"
     return {
         "current_agent": first_agent,
+        "revision": 0,
         "phase": "initialization",
         "status": "in_progress",
-        "task_context": {"day": 0, "topic": "", "project_dir": "", "project_path": project_dir(project)},
-        "agents": agents,
-        "agent_meta": get_agent_meta(),
+        "project_id": project,
+        "project_root": ".",
+        "task_context": {"day": 0, "topic": "", "project_dir": ""},
         "assigned_agent": first_agent,
         "blockers": [],
         "last_wake_hash": "",
+        "automation_enabled": False,
+        "last_dispatch_id": "",
+        "last_wake_status": "",
         "last_woken_at": "",
         "wake_count": 0,
         "last_output": "",
         "files_changed": [],
         "verify_commands": [],
         "next_action": f"{first_agent} starts requirements analysis for {project}",
+        "task": {
+            "id": "T-001",
+            "title": "Project initialization",
+            "goal": f"Initialize {project}",
+            "owner": first_agent,
+            "status": "active",
+            "next_action": f"{first_agent} starts requirements analysis for {project}",
+            "acceptance": [],
+            "verify_commands": [],
+            "rule_tags": [],
+            "last_output": "",
+            "blockers": [],
+            "decision_ids": [],
+            "cli_sessions": {},
+        },
+        "goal": None,
+        "goal_queue": [],
+        "goal_history": [],
         "updated_at": "",
     }
 
@@ -303,32 +331,81 @@ def load_state(project):
     for key in base:
         if key not in state:
             state[key] = base[key]
-    ensure_project_path(project, state, write=False)
+    task = state.setdefault("task", {})
+    task.setdefault("id", "T-001")
+    task.setdefault("title", state.get("next_action") or "Current task")
+    if "goal" not in task and "goal_id" not in task:
+        task["goal"] = task.get("title", "Current task")
+    task.setdefault("owner", state.get("assigned_agent") or state.get("current_agent"))
+    task.setdefault("status", {"in_progress": "active"}.get(state.get("status"), state.get("status", "active")))
+    task.setdefault("next_action", state.get("next_action", ""))
+    task.setdefault("acceptance", [])
+    task.setdefault("verify_commands", state.get("verify_commands", []))
+    task.setdefault("rule_tags", [])
+    task.setdefault("last_output", state.get("last_output", ""))
+    task.setdefault("blockers", state.get("blockers", []))
+    task.setdefault("decision_ids", [])
+    task.setdefault("cli_sessions", {})
+    goal = state.get("goal") or {}
+    if goal.get("id"):
+        for milestone in [task, *goal.get("queue", [])]:
+            if milestone.get("goal") == goal.get("text"):
+                milestone.pop("goal", None)
+                milestone["goal_id"] = goal["id"]
+    _apply_task_to_legacy_fields(state)
+    state.setdefault("project_id", project)
+    state.setdefault("project_root", ".")
+    state.setdefault("task_context", {}).pop("project_path", None)
     return state
 
 
 def write_state(project, state, touch=True):
+    _apply_task_to_legacy_fields(state)
     if touch:
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    state.setdefault("task_context", {}).pop("project_path", None)
+    if os.path.exists(protocol_file(project)):
+        state.pop("agents", None)
+        state.pop("agent_meta", None)
     sf = state_file(project)
-    with open(sf, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    with file_lock(sf + ".lock"):
+        disk_revision = 0
+        if os.path.exists(sf):
+            with open(sf, encoding="utf-8") as f:
+                disk_revision = json.load(f).get("revision", 0)
+            if state.get("revision", 0) != disk_revision:
+                raise RuntimeError(f"state revision conflict: expected {state.get('revision', 0)}, found {disk_revision}")
+        state["revision"] = disk_revision + 1
+        atomic_write_json(sf, state)
 
 
 def save_state(project, state):
     write_state(project, state, touch=True)
 
 
+def _apply_task_to_legacy_fields(state):
+    """Derive old report fields from the canonical task object."""
+    task = state.get("task") or {}
+    if not task:
+        return
+    owner = task.get("owner") or state.get("current_agent") or "agent"
+    state["current_agent"] = owner
+    state["assigned_agent"] = owner
+    state["status"] = {"active": "in_progress"}.get(task.get("status"), task.get("status", "in_progress"))
+    state["next_action"] = task.get("next_action", "")
+    state["last_output"] = task.get("last_output", "")
+    state["blockers"] = task.get("blockers", [])
+    state["verify_commands"] = task.get("verify_commands", [])
+
+
 def ensure_project_path(project, state=None, write=True):
+    """Drop legacy absolute paths; resolve them from local config at runtime."""
     state = state or load_state(project)
     ctx = state.setdefault("task_context", {})
-    path = project_dir(project)
-    changed = ctx.get("project_path") != path
-    ctx["project_path"] = path
+    changed = "project_path" in ctx
+    ctx.pop("project_path", None)
     if changed and write:
         write_state(project, state, touch=False)
-        append_comms(project, f"目录更新：项目当前路径为 `{path}`。whip / inbox 后续按此路径唤醒。")
     return changed
 
 
@@ -336,8 +413,10 @@ def append_comms(project, message):
     path = comms_file(project)
     if not os.path.exists(path):
         return
+    timestamp = datetime.now().isoformat(timespec="seconds")
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"\n- {datetime.now().isoformat(timespec='seconds')} — {message}\n")
+        f.write(f"\n### [system] {timestamp}\n\n{message}\n")
+    _archive_collab_file(project, "AGENT_COMMS.md", topic="AGENT_COMMS", quiet=True)
 
 
 # ── Commands ───────────────────────────────────────────────────────────────────
@@ -359,43 +438,70 @@ def cmd_configure(args):
 
 def write_agent_manifest(project):
     path = os.path.join(project_collab_dir(project), "AGENTS.md")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# Agents — {project}\n\n")
-        f.write("| Agent | Role | Assignment |\n")
-        f.write("|---|---|---|\n")
-        for agent in get_agents():
-            role = get_agent_label(agent)
-            assignment = get_agent_assignment(agent) or "—"
-            f.write(f"| `{agent}` | {role} | {assignment} |\n")
+    lines = [f"# Agents — {project}", "", "| Agent | Roles | Driver | Capabilities | Assignment |", "|---|---|---|---|---|"]
+    protocol = load_protocol(project) if os.path.exists(protocol_file(project)) else None
+    for agent in get_project_agents(project):
+        meta = protocol.get("agents", {}).get(agent, {}) if protocol else {}
+        roles = ", ".join(meta.get("roles") or [meta.get("role") or get_agent_label(agent)])
+        capabilities = ", ".join(meta.get("capabilities") or []) or "—"
+        assignment = meta.get("assignment") or get_agent_assignment(agent) or "—"
+        lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {capabilities} | {assignment} |")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def cmd_agent(args, project=None):
     cfg = load_config()
     cfg.setdefault("agent_meta", {})
     if args.action == "list":
-        for agent in cfg.get("agents", DEFAULT_AGENTS):
-            assignment = cfg["agent_meta"].get(agent, {}).get("assignment", "")
-            suffix = f" — {assignment}" if assignment else ""
-            print(f"{agent}: {get_agent_label(agent)}{suffix}")
+        if project and os.path.exists(protocol_file(project)):
+            data = load_protocol(project)
+            for agent in proto.enabled_agents(data):
+                meta = data["agents"][agent]
+                suffix = f" — {meta.get('assignment')}" if meta.get("assignment") else ""
+                print(f"{agent}: {meta.get('role', agent)}{suffix}")
+        else:
+            for agent in cfg.get("agents", DEFAULT_AGENTS):
+                assignment = cfg["agent_meta"].get(agent, {}).get("assignment", "")
+                suffix = f" — {assignment}" if assignment else ""
+                print(f"{agent}: {get_agent_label(agent)}{suffix}")
         return
 
-    if args.name not in cfg.get("agents", []):
-        cfg.setdefault("agents", []).append(args.name)
-    meta = cfg["agent_meta"].setdefault(args.name, {})
-    if args.role:
-        meta["role"] = args.role
-    if args.assignment:
-        meta["assignment"] = args.assignment
-    save_config(cfg)
-
     if project and os.path.exists(state_file(project)):
-        state = load_state(project)
-        state["agents"] = cfg["agents"]
-        state["agent_meta"] = cfg["agent_meta"]
-        write_state(project, state, touch=False)
+        data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+        old = data.setdefault("agents", {}).get(args.name, {})
+        meta = {
+            "role": args.role or old.get("role") or args.name,
+            "roles": getattr(args, "roles", None) or old.get("roles"),
+            "capabilities": getattr(args, "capabilities", None) if getattr(args, "capabilities", None) is not None else old.get("capabilities"),
+            "driver": getattr(args, "driver", None) or old.get("driver"),
+            "priority": getattr(args, "priority", None) if getattr(args, "priority", None) is not None else old.get("priority", 50),
+            "cost_tier": getattr(args, "cost_tier", None) or old.get("cost_tier", "medium"),
+            "assignment": args.assignment if args.assignment is not None else old.get("assignment", ""),
+            "enabled": True,
+        }
+        data.setdefault("agents", {})[args.name] = proto.normalize_agent(args.name, meta)
+        proto.save(project_dir(project), data)
+        proto.write_handbook(project_dir(project), data)
+        agent_dir = os.path.join(conversations_dir(project), args.name)
+        os.makedirs(agent_dir, exist_ok=True)
+        current = os.path.join(agent_dir, "current.md")
+        if not os.path.exists(current):
+            _write_session_template(args.name, project, current)
         write_agent_manifest(project)
         append_comms(project, f"Agent 更新：`{args.name}` = {meta.get('role', args.name)}；作业：{meta.get('assignment', '—')}。")
+    else:
+        if args.name not in cfg.get("agents", []):
+            cfg.setdefault("agents", []).append(args.name)
+        meta = cfg["agent_meta"].setdefault(args.name, {})
+        if args.role:
+            meta["role"] = args.role
+        for field in ("roles", "capabilities", "driver", "priority", "cost_tier"):
+            value = getattr(args, field, None)
+            if value is not None:
+                meta[field] = value
+        if args.assignment:
+            meta["assignment"] = args.assignment
+        save_config(cfg)
 
     print(f"agent saved: {args.name}")
 
@@ -501,7 +607,7 @@ def check_and_rotate_agent(project, agent, topic=None):
     with open(curr, encoding="utf-8") as f:
         content = f.read()
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_topic = (topic or "auto_session").replace(" ", "_").replace("/", "-")[:40]
     archive_name = f"{timestamp}_{safe_topic}.md"
     archive_path = os.path.join(conversations_dir(project), agent, archive_name)
@@ -526,7 +632,7 @@ def check_and_rotate_agent(project, agent, topic=None):
 def auto_rotate_all_agents(project):
     """Check and rotate all agents + collab files in a project. Returns summary dict."""
     rotated_agents = []
-    for agent in get_agents():
+    for agent in get_project_agents(project):
         if check_and_rotate_agent(project, agent, topic="auto_daemon"):
             rotated_agents.append(agent)
     rotated_files = auto_rotate_collab_files(project)
@@ -552,12 +658,44 @@ def _file_needs_rotation(filepath, max_lines=None, max_kb=None):
     return (line_count > max_lines or size > max_kb * 1024), line_count, size
 
 
-def _archive_collab_file(project, rel_path, topic=None):
+def _archive_collab_file(project, rel_path, topic=None, quiet=False):
     """Archive a collab file: keep recent content, move old content to archive.
     Returns True if archived, False otherwise."""
     filepath = _collab_file_path(project, rel_path)
     if not os.path.exists(filepath):
         return False
+
+    if rel_path == "AGENT_COMMS.md":
+        needs, stats = rot.comms_needs_block_rotation(
+            filepath, COLLAB_FILE_MAX_LINES, COLLAB_FILE_MAX_KB, rot.COMMS_KEEP_RECENT_BLOCKS
+        )
+        if not needs:
+            return False
+        keep_blocks = rot.COMMS_KEEP_RECENT_BLOCKS
+        if stats["lines"] > COLLAB_FILE_MAX_LINES or stats["bytes"] > COLLAB_FILE_MAX_KB * 1024:
+            with open(filepath, encoding="utf-8") as f:
+                preamble, blocks = rot.split_message_blocks(f.read())
+            for candidate in range(min(keep_blocks, len(blocks) - 1), 0, -1):
+                kept = preamble + "\n\n" + "\n\n".join(blocks[-candidate:])
+                if len(kept.splitlines()) <= COLLAB_FILE_MAX_LINES and len(kept.encode("utf-8")) <= COLLAB_FILE_MAX_KB * 1024:
+                    keep_blocks = candidate
+                    break
+            else:
+                keep_blocks = 1
+        archive_dir = os.path.join(project_memory_dir(project), "sessions")
+        archived, archive_path = rot.archive_comms_by_blocks(
+            project,
+            filepath,
+            archive_dir,
+            keep_blocks=keep_blocks,
+            topic=topic or "AGENT_COMMS",
+        )
+        if archived and not quiet:
+            print(
+                f"🔄 Archived: {rel_path} ({stats['lines']}L, {stats['blocks']} blocks "
+                f"→ keep {keep_blocks})"
+            )
+        return archived
 
     needs, lines, size = _file_needs_rotation(filepath)
     if not needs:
@@ -578,7 +716,7 @@ def _archive_collab_file(project, rel_path, topic=None):
     archive_dir = os.path.join(project_memory_dir(project), "sessions")
     os.makedirs(archive_dir, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_name = rel_path.replace("/", "_").replace(".md", "")
     safe_topic = (topic or safe_name).replace(" ", "_")[:40]
     archive_name = f"{timestamp}_{safe_topic}.md"
@@ -598,7 +736,8 @@ def _archive_collab_file(project, rel_path, topic=None):
         f.write(f"<!-- Previous content archived to: {archive_path} -->\n")
         f.writelines(recent_lines)
 
-    print(f"🔄 Archived: {rel_path} ({lines}L → keep {keep_n}L, archived {len(old_lines)}L)")
+    if not quiet:
+        print(f"🔄 Archived: {rel_path} ({lines}L → keep {keep_n}L, archived {len(old_lines)}L)")
     return True
 
 
@@ -609,6 +748,150 @@ def auto_rotate_collab_files(project):
         if _archive_collab_file(project, rel_path, topic=rel_path.replace("/", "_")):
             rotated.append(rel_path)
     return rotated
+
+
+def list_collab_projects():
+    """Return sorted project names that have collab/ under projects_dir."""
+    projects_dir = get_projects_dir()
+    if not os.path.isdir(projects_dir):
+        return []
+    return sorted(
+        name
+        for name in os.listdir(projects_dir)
+        if name not in ("by_rm", "archive")
+        and os.path.isdir(os.path.join(projects_dir, name, "collab"))
+    )
+
+
+def build_rotation_health(project):
+    """Scan rotation thresholds without loading full file bodies into prompts."""
+    agent_rows = []
+    for agent in get_project_agents(project):
+        needs, lines, size = _needs_rotation(project, agent)
+        agent_rows.append(
+            {
+                "agent": agent,
+                "lines": lines,
+                "bytes": size,
+                "needs_rotation": needs,
+            }
+        )
+
+    collab_rows = []
+    for rel_path in TRACKED_COLLAB_FILES:
+        fpath = _collab_file_path(project, rel_path)
+        if rel_path == "AGENT_COMMS.md":
+            needs, stats = rot.comms_needs_block_rotation(
+                fpath, COLLAB_FILE_MAX_LINES, COLLAB_FILE_MAX_KB, rot.COMMS_KEEP_RECENT_BLOCKS
+            )
+            collab_rows.append(
+                {
+                    "file": rel_path,
+                    "lines": stats.get("lines", 0),
+                    "bytes": stats.get("bytes", 0),
+                    "blocks": stats.get("blocks", 0),
+                    "needs_rotation": needs,
+                }
+            )
+        else:
+            needs, lines, size = _file_needs_rotation(fpath)
+            collab_rows.append(
+                {
+                    "file": rel_path,
+                    "lines": lines,
+                    "bytes": size,
+                    "blocks": None,
+                    "needs_rotation": needs,
+                }
+            )
+
+    budget = build_memory_budget(project)
+    needs_enforcement = any(r["needs_rotation"] for r in agent_rows + collab_rows)
+    if not budget["hot"]["ok"] or not budget["warm"]["ok"]:
+        needs_enforcement = True
+
+    return {
+        "project": project,
+        "agents": agent_rows,
+        "collab_files": collab_rows,
+        "budget": {
+            "hot_ok": budget["hot"]["ok"],
+            "warm_ok": budget["warm"]["ok"],
+            "hot_tokens": budget["hot"]["tokens"],
+            "warm_tokens": budget["warm"]["tokens"],
+        },
+        "needs_enforcement": needs_enforcement,
+    }
+
+
+def enforce_project_rotation(project, budget_aware=True):
+    """Rotate all overdue agent sessions and collab files. Returns summary dict."""
+    summary = {"project": project, "agents": [], "files": [], "passes": 0}
+
+    def _run_pass():
+        rotated_agents = []
+        for agent in get_project_agents(project):
+            if check_and_rotate_agent(project, agent, topic="enforce_rotation"):
+                rotated_agents.append(agent)
+        rotated_files = auto_rotate_collab_files(project)
+        return rotated_agents, rotated_files
+
+    for _ in range(2):
+        agents, files = _run_pass()
+        if agents or files:
+            summary["passes"] += 1
+            summary["agents"].extend(agents)
+            summary["files"].extend(files)
+        else:
+            break
+
+    if budget_aware:
+        budget = build_memory_budget(project)
+        if not budget["warm"]["ok"]:
+            agents, files = _run_pass()
+            if agents or files:
+                summary["passes"] += 1
+                summary["agents"].extend(agents)
+                summary["files"].extend(files)
+
+    summary["health"] = build_rotation_health(project)
+    summary["ok"] = not summary["health"]["needs_enforcement"]
+    return summary
+
+
+def format_rotation_health(report):
+    lines = [
+        f"# Rotation Health — {report['project']}",
+        "",
+        f"needs_enforcement: {'YES' if report['needs_enforcement'] else 'NO'}",
+        f"budget: hot {'OK' if report['budget']['hot_ok'] else 'OVER'} "
+        f"({report['budget']['hot_tokens']} tok), "
+        f"warm {'OK' if report['budget']['warm_ok'] else 'OVER'} "
+        f"({report['budget']['warm_tokens']} tok)",
+        "",
+        "## Agent Sessions",
+    ]
+    for row in report["agents"]:
+        flag = "ROTATE" if row["needs_rotation"] else "ok"
+        lines.append(
+            f"- {row['agent']}: {row['lines']}L, {row['bytes'] / 1024:.1f}KB — {flag}"
+        )
+    lines.append("")
+    lines.append("## Collab Files")
+    for row in report["collab_files"]:
+        flag = "ROTATE" if row["needs_rotation"] else "ok"
+        extra = f", {row['blocks']} blocks" if row.get("blocks") is not None else ""
+        lines.append(
+            f"- {row['file']}: {row['lines']}L{extra}, {row['bytes'] / 1024:.1f}KB — {flag}"
+        )
+    lines += [
+        "",
+        "Enforce:",
+        f"- plow-whip --project {report['project']} memory-rotate",
+        f"- plow-whip --project {report['project']} memory-budget --enforce-rotate",
+        f"- plow-whip scheduler install --interval 300",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def scan_md_activity(project):
@@ -737,12 +1020,12 @@ def cmd_memory_rotate(project, args):
 
     # 1. Rotate agent sessions
     print("  ── Agent Sessions ──")
-    for agent in get_agents():
+    for agent in get_project_agents(project):
         needs, lines, size = _needs_rotation(project, agent)
         status = "🔴" if needs else "🟢"
         print(f"  {status} {agent:12s} — {lines} lines, {size / 1024:.1f}KB")
     rotated_agents = []
-    for agent in get_agents():
+    for agent in get_project_agents(project):
         if check_and_rotate_agent(project, agent, topic="memory_rotate"):
             rotated_agents.append(agent)
     if rotated_agents:
@@ -814,7 +1097,9 @@ def _cold_memory_stats(project):
 
 
 def build_memory_budget(project):
-    hot_files = [_memory_file_stats(project, rel) for rel in HOT_MEMORY_FILES]
+    state = load_state(project)
+    payload = json.dumps(build_start_pack(project, state.get("current_agent")), ensure_ascii=False, separators=(",", ":"))
+    hot_files = [{"file": "start --json payload", "exists": True, "bytes": len(payload.encode()), "tokens": (len(payload) + 3) // 4, "lines": None}]
     warm_files = [_memory_file_stats(project, rel) for rel in WARM_MEMORY_FILES]
     hot_tokens = sum(item["tokens"] for item in hot_files)
     warm_tokens = sum(item["tokens"] for item in warm_files)
@@ -823,6 +1108,7 @@ def build_memory_budget(project):
         "budgets": {"hot": HOT_TOKEN_BUDGET, "warm": WARM_TOKEN_BUDGET},
         "hot": {"tokens": hot_tokens, "ok": hot_tokens <= HOT_TOKEN_BUDGET, "files": hot_files},
         "warm": {"tokens": warm_tokens, "ok": warm_tokens <= WARM_TOKEN_BUDGET, "files": warm_files},
+        "machine": {"files": [_memory_file_stats(project, rel) for rel in ["AGENT_STATE.json", *MACHINE_RULE_FILES]]},
         "cold": _cold_memory_stats(project),
     }
 
@@ -848,39 +1134,76 @@ def format_memory_budget(report):
     cold = report["cold"]
     lines += [
         "",
+        "Machine truth (compiled before model context):",
+        *[f"- {item['file']}: {item['tokens']} tok, {item['bytes']} bytes" for item in report["machine"]["files"]],
+        "",
         "Cold:",
         f"- archived files: {cold['files']}",
         f"- stored size: {cold['bytes'] / 1024:.1f}KB",
         "",
         "Rule:",
         "- Hot should stay tiny enough to read every wakeup.",
-        "- Warm is loaded only when context-pack is not enough.",
+        "- Warm contains only targeted messages included by start.",
         "- Cold is searched/restored, not read wholesale.",
     ]
 
     over = []
     if not report["hot"]["ok"]:
-        over.append("Hot exceeds budget: move detail into Warm/Cold and keep NEXT_ACTION single-task.")
+        over.append("Hot exceeds budget: keep AGENT_STATE.task single-purpose and compact protocol summaries.")
     if not report["warm"]["ok"]:
-        over.append("Warm exceeds budget: rotate AGENT_COMMS/DECISIONS or archive old roadmap detail.")
+        over.append("Warm exceeds budget: rotate handled AGENT_COMMS blocks.")
     if over:
         lines += ["", "Actions"] + [f"- {item}" for item in over]
     return "\n".join(lines) + "\n"
 
 
+def cmd_rotation_health(project, args):
+    health = build_rotation_health(project)
+    if getattr(args, "enforce", False):
+        summary = enforce_project_rotation(project)
+        health = summary["health"]
+        if not getattr(args, "json", False):
+            if summary["agents"] or summary["files"]:
+                print(
+                    f"✂️  Rotation enforced: agents={summary['agents'] or '—'}, "
+                    f"files={summary['files'] or '—'}"
+                )
+            else:
+                print("✅ No rotation needed.")
+    if getattr(args, "json", False):
+        print(json.dumps(health, ensure_ascii=False, indent=2))
+    else:
+        print(format_rotation_health(health), end="")
+
+
 def cmd_memory_budget(project, args):
+    if getattr(args, "enforce_rotate", False):
+        summary = enforce_project_rotation(project)
+        if not getattr(args, "json", False):
+            if summary["agents"] or summary["files"]:
+                print(
+                    f"✂️  Rotation enforced: agents={summary['agents'] or '—'}, "
+                    f"files={summary['files'] or '—'}"
+                )
+            else:
+                print("✅ No rotation needed.")
     report = build_memory_budget(project)
     if getattr(args, "json", False):
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        payload = report
+        if getattr(args, "enforce_rotate", False):
+            payload = {"budget": report, "rotation": build_rotation_health(project)}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(format_memory_budget(report), end="")
+        if not report["hot"]["ok"] or not report["warm"]["ok"]:
+            print("\nTip: run memory-budget --enforce-rotate to archive overdue files.\n")
 
 
 def cmd_handoff(project, args):
     state = load_state(project)
     ensure_project_path(project, state)
     current = state["current_agent"]
-    agents = get_agents()
+    agents = get_project_agents(project)
     idx = agents.index(current) if current in agents else 0
     requested_agent = getattr(args, "to", None)
     if requested_agent and requested_agent not in agents:
@@ -896,6 +1219,17 @@ def cmd_handoff(project, args):
     state["last_output"] = args.output
     state["next_action"] = args.next or ""
     state["blockers"] = getattr(args, "blockers", None) or []
+    next_status = "blocked" if args.status == "blocked" else ("active" if (args.next or "").strip() else "done")
+    state["task"] = {
+        "id": state.get("task", {}).get("id", "T-001"),
+        "title": state.get("task", {}).get("title") or state.get("next_action") or "Current task",
+        "owner": next_agent,
+        "status": next_status,
+        "next_action": args.next or "",
+        "last_output": args.output,
+        "blockers": state["blockers"],
+        "decision_ids": state.get("task", {}).get("decision_ids", []),
+    }
     if args.day is not None:
         state.setdefault("task_context", {})["day"] = args.day
     if args.topic:
@@ -924,6 +1258,10 @@ def cmd_handoff(project, args):
         needs, lines, size = _needs_rotation(project, current)
         print(f"   📝 {current} session: {lines} lines, {size / 1024:.1f}KB — no rotation needed")
 
+    rotated_files = auto_rotate_collab_files(project)
+    if rotated_files:
+        print(f"   ✂️  Collab rotated: {', '.join(rotated_files)}")
+
 
 def cmd_reset(project):
     save_state(project, default_state(project))
@@ -949,17 +1287,16 @@ def cmd_init(project, args=None):
     # Create memory/ directory
     mem_dir = project_memory_dir(project)
     os.makedirs(mem_dir, exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "adr"), exist_ok=True)
     os.makedirs(os.path.join(mem_dir, "sessions"), exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "sprints", "active"), exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "sprints", "archive"), exist_ok=True)
 
     # Render templates
     for tpl_name, out_name in MEMORY_TEMPLATE_MAP:
         write_rendered(os.path.join(mem_dir, out_name), f"memory/{tpl_name}", project)
 
-    # Render CONVENTIONS.md
-    write_conventions(os.path.join(pcd, "CONVENTIONS.md"), project)
+    # Canonical machine protocol + derived human handbook.
+    proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+    proto.write_handbook(project_dir(project))
+    _write_compat_conventions(project)
     write_agent_manifest(project)
 
     # Create AGENT_COMMS.md
@@ -973,7 +1310,7 @@ def cmd_init(project, args=None):
     print(f"   collab/: {pcd}")
     print(f"   memory/: {mem_dir}")
     print(f"   state:   {sf}")
-    print(f"   Run: plow-whip --project {project} handoff --output 'Start' --next 'First step'\n")
+    print(f"   Run: plow-whip --project {project} start --agent {default_state(project)['current_agent']} --json\n")
 
 
 def cmd_new(project, args):
@@ -986,19 +1323,21 @@ def cmd_new(project, args):
     owner = (getattr(args, "owner", None) or "").strip()
     if first_action or owner:
         state = load_state(project)
+        task = state.setdefault("task", {})
         if owner:
-            if owner not in get_agents():
+            if owner not in get_project_agents(project):
                 print(f"Error: unknown owner '{owner}'. Run: plow-whip agent set {owner}", file=sys.stderr)
                 sys.exit(1)
-            state["current_agent"] = owner
-            state["assigned_agent"] = owner
+            task["owner"] = owner
         if first_action:
-            state["next_action"] = first_action
+            task["title"] = first_action
+            task["next_action"] = first_action
+            task["status"] = "active"
         save_state(project, state)
         append_comms(project, f"新项目一键接入：owner=`{state['current_agent']}`；next=`{state['next_action']}`。")
 
     print(f"   Next lightweight context:")
-    print(f"   plow-whip --project {project} context-pack --agent {load_state(project)['current_agent']}\n")
+    print(f"   plow-whip --project {project} start --agent {load_state(project)['current_agent']} --json\n")
 
 
 def _ensure_plow_whip_structure(project):
@@ -1006,7 +1345,19 @@ def _ensure_plow_whip_structure(project):
     pcd = project_collab_dir(project)
     os.makedirs(pcd, exist_ok=True)
     os.makedirs(conversations_dir(project), exist_ok=True)
-    for agent in get_agents():
+    seed_agents = get_agents()
+    seed_meta = get_agent_meta()
+    if os.path.exists(state_file(project)) and not os.path.exists(protocol_file(project)):
+        try:
+            with open(state_file(project), encoding="utf-8") as f:
+                legacy_state = json.load(f)
+            seed_agents = legacy_state.get("agents") or seed_agents
+            seed_meta = legacy_state.get("agent_meta") or seed_meta
+        except (OSError, json.JSONDecodeError):
+            pass
+    proto.ensure(project_dir(project), project, seed_agents, seed_meta)
+    proto.write_handbook(project_dir(project))
+    for agent in get_project_agents(project):
         agent_dir = os.path.join(conversations_dir(project), agent)
         os.makedirs(agent_dir, exist_ok=True)
         current = os.path.join(agent_dir, "current.md")
@@ -1015,26 +1366,58 @@ def _ensure_plow_whip_structure(project):
 
     mem_dir = project_memory_dir(project)
     os.makedirs(mem_dir, exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "adr"), exist_ok=True)
     os.makedirs(os.path.join(mem_dir, "sessions"), exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "sprints", "active"), exist_ok=True)
-    os.makedirs(os.path.join(mem_dir, "sprints", "archive"), exist_ok=True)
 
     for tpl_name, out_name in MEMORY_TEMPLATE_MAP:
         target = os.path.join(mem_dir, out_name)
         if not os.path.exists(target):
             write_rendered(target, f"memory/{tpl_name}", project)
 
-    conventions = os.path.join(pcd, "CONVENTIONS.md")
-    if not os.path.exists(conventions):
-        write_conventions(conventions, project)
-    if not os.path.exists(os.path.join(pcd, "AGENTS.md")):
-        write_agent_manifest(project)
+    _write_compat_conventions(project)
+    write_agent_manifest(project)
     if not os.path.exists(comms_file(project)):
         write_rendered(comms_file(project), "AGENT_COMMS.md.tpl", project)
     if not os.path.exists(state_file(project)):
         save_state(project, default_state(project))
-        append_comms(project, f"plow-whip doctor --repair：机制缺失，已自动接入；当前路径 `{project_dir(project)}`。")
+        append_comms(project, f"plow-whip repair：机制缺失，已自动接入；当前路径 `{project_dir(project)}`。")
+    else:
+        try:
+            write_state(project, load_state(project), touch=False)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+
+def _state_protocol_issues(project):
+    issues = []
+    try:
+        data = load_protocol(project)
+        agents = proto.enabled_agents(data)
+        proto.effective_rules(data)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return [f"invalid AGENT_PROTOCOL.json: {exc}"]
+    try:
+        with open(state_file(project), encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"invalid AGENT_STATE.json: {exc}"]
+    task = raw.get("task")
+    if not isinstance(task, dict):
+        return ["AGENT_STATE.json has no canonical task object"]
+    owner = task.get("owner")
+    if owner not in agents:
+        issues.append(f"task owner '{owner}' is not an enabled project agent")
+    expected = {
+        "current_agent": owner,
+        "assigned_agent": owner,
+        "status": {"active": "in_progress"}.get(task.get("status"), task.get("status", "in_progress")),
+        "next_action": task.get("next_action", ""),
+        "last_output": task.get("last_output", ""),
+        "blockers": task.get("blockers", []),
+    }
+    drift = [key for key, value in expected.items() if raw.get(key) != value]
+    if drift:
+        issues.append("derived state fields drifted: " + ", ".join(drift))
+    return issues
 
 
 def build_doctor_report(project):
@@ -1043,26 +1426,38 @@ def build_doctor_report(project):
         ("collab/", project_collab_dir(project)),
         ("collab/AGENT_STATE.json", state_file(project)),
         ("collab/AGENT_COMMS.md", comms_file(project)),
-        ("collab/AGENTS.md", os.path.join(project_collab_dir(project), "AGENTS.md")),
-        ("collab/CONVENTIONS.md", os.path.join(project_collab_dir(project), "CONVENTIONS.md")),
-        ("collab/memory/PROJECT.md", os.path.join(project_memory_dir(project), "PROJECT.md")),
-        ("collab/memory/CURRENT_STATUS.md", os.path.join(project_memory_dir(project), "CURRENT_STATUS.md")),
-        ("collab/memory/NEXT_ACTION.md", os.path.join(project_memory_dir(project), "NEXT_ACTION.md")),
-        ("collab/memory/ROADMAP.md", os.path.join(project_memory_dir(project), "ROADMAP.md")),
+        ("collab/AGENT_PROTOCOL.json", protocol_file(project)),
         ("collab/memory/DECISIONS.md", os.path.join(project_memory_dir(project), "DECISIONS.md")),
         ("collab/memory/sessions/", os.path.join(project_memory_dir(project), "sessions")),
     ]
-    for agent in get_agents():
+    optional = [
+        ("collab/AGENTS.md", os.path.join(project_collab_dir(project), "AGENTS.md")),
+        ("collab/HANDBOOK.zh-CN.md", handbook_file(project)),
+        ("collab/CONVENTIONS.agent.md", conventions_agent_file(project)),
+        ("collab/CONVENTIONS.md", conventions_human_file(project)),
+    ]
+    for agent in get_project_agents(project):
         required.append((f"collab/conversations/{agent}/current.md", os.path.join(conversations_dir(project), agent, "current.md")))
     checks = [{"name": name, "path": path, "ok": os.path.exists(path)} for name, path in required]
+    optional_checks = [{"name": name, "path": path, "ok": os.path.exists(path)} for name, path in optional]
     missing = [item for item in checks if not item["ok"]]
+    issues = _state_protocol_issues(project) if not missing else []
+    repairable = bool(missing) or bool(issues and all(issue.startswith("derived state fields drifted") for issue in issues))
     return {
         "project": project,
         "project_path": project_dir(project),
-        "ok": not missing,
+        "ok": not missing and not issues,
         "checks": checks,
+        "optional_checks": optional_checks,
         "missing": missing,
-        "next": "Run context-pack, then obey CONVENTIONS.md." if not missing else "Run doctor --repair before doing project work.",
+        "issues": issues,
+        "next": (
+            f"Run plow-whip --project {project} start --agent <agent> --json."
+            if not missing and not issues
+            else f"Run plow-whip --project {project} repair, then doctor again."
+            if repairable
+            else "Restore or fix the canonical JSON file reported above; repair will not overwrite it."
+        ),
     }
 
 
@@ -1077,18 +1472,47 @@ def format_doctor_report(report):
     ]
     for item in report["checks"]:
         lines.append(f"- {'OK' if item['ok'] else 'MISS'} {item['name']}")
+    if report.get("optional_checks"):
+        lines += ["", "## Derived / Compatibility Views"]
+        for item in report["optional_checks"]:
+            lines.append(f"- {'OK' if item['ok'] else 'REBUILD'} {item['name']}")
+    if report.get("issues"):
+        lines += ["", "## Issues"] + [f"- {issue}" for issue in report["issues"]]
     lines += ["", "## Next", report["next"]]
     return "\n".join(lines) + "\n"
 
 
 def cmd_doctor(project, args):
     if getattr(args, "repair", False):
-        _ensure_plow_whip_structure(project)
+        try:
+            _ensure_plow_whip_structure(project)
+            if not getattr(args, "skip_rotate", False):
+                enforce_project_rotation(project)
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
     report = build_doctor_report(project)
+    health = build_rotation_health(project) if report["ok"] else None
+    report["rotation"] = health
     if getattr(args, "json", False):
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print(format_doctor_report(report), end="")
+        if health and health["needs_enforcement"]:
+            print(format_rotation_health(health), end="")
+
+
+def cmd_repair(project, args):
+    error = None
+    try:
+        _ensure_plow_whip_structure(project)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        error = str(exc)
+    report = build_doctor_report(project)
+    payload = {"project": project, "repaired": report["ok"], "error": error, "doctor": report}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Repaired plow-whip structure for {project}.")
 
 
 def _read_text(path, default=""):
@@ -1125,100 +1549,370 @@ def _latest_targeted_blocks(markdown, agent, limit=3):
     return wanted[-limit:]
 
 
-def build_context_pack(project, agent=None, max_comms=3, max_next_chars=1200):
-    """Compile the smallest useful context an agent should read on wakeup."""
-    state = load_state(project)
-    ensure_project_path(project, state)
-    agent = agent or state.get("current_agent")
-    ctx = state.get("task_context", {})
-    pdir = project_dir(project)
-    comms = _read_text(comms_file(project))
-    next_action_text = _read_text(os.path.join(project_memory_dir(project), "NEXT_ACTION.md"))
-    blocks = _latest_targeted_blocks(comms, agent, limit=max_comms)
-
-    return {
-        "project": project,
-        "project_path": pdir,
-        "agent": agent,
-        "phase": state.get("phase", ""),
-        "status": state.get("status", ""),
-        "updated_at": state.get("updated_at", ""),
-        "next_action": state.get("next_action", ""),
-        "last_output": state.get("last_output", ""),
-        "blockers": state.get("blockers", []),
-        "files_changed": state.get("files_changed", []),
-        "verify_commands": state.get("verify_commands", []),
-        "task_context": {
-            "day": ctx.get("day"),
-            "topic": ctx.get("topic", ""),
-            "project_dir": ctx.get("project_dir", ""),
-        },
-        "read_first": [
-            os.path.join(pdir, "collab", "CONVENTIONS.md"),
-            os.path.join(pdir, "collab", "AGENT_STATE.json"),
-            os.path.join(pdir, "collab", "memory", "NEXT_ACTION.md"),
-        ],
-        "read_if_needed": [
-            os.path.join(pdir, "collab", "AGENT_COMMS.md"),
-            os.path.join(pdir, "collab", "memory", "CURRENT_STATUS.md"),
-            os.path.join(pdir, "collab", "memory", "DECISIONS.md"),
-        ],
-        "next_action_file_excerpt": _clamp_text(next_action_text, max_next_chars),
-        "recent_relevant_messages": blocks,
-    }
-
-
-def format_context_pack(pack):
-    lines = [
-        f"# plow-whip Context Pack — {pack['project']}",
-        "",
-        f"- agent: {pack['agent']}",
-        f"- phase: {pack['phase']}",
-        f"- status: {pack['status']}",
-        f"- updated_at: {pack['updated_at'] or '(never)'}",
-        f"- project_path: {pack['project_path']}",
-        "",
-        "## Current Task",
-        pack["next_action"] or "(none)",
-        "",
-        "## Last Output",
-        pack["last_output"] or "(none)",
-    ]
-    if pack["blockers"]:
-        lines += ["", "## Blockers"] + [f"- {b}" for b in pack["blockers"]]
-    if pack["files_changed"]:
-        lines += ["", "## Files Changed"] + [f"- {f}" for f in pack["files_changed"]]
-    if pack["verify_commands"]:
-        lines += ["", "## Verify"] + [f"- {c}" for c in pack["verify_commands"]]
-
-    lines += [
-        "",
-        "## Read First",
-    ] + [f"- {p}" for p in pack["read_first"]]
-
-    lines += [
-        "",
-        "## Read If Needed",
-    ] + [f"- {p}" for p in pack["read_if_needed"]]
-
-    if pack["next_action_file_excerpt"]:
-        lines += ["", "## NEXT_ACTION Excerpt", pack["next_action_file_excerpt"]]
-    if pack["recent_relevant_messages"]:
-        lines += ["", "## Recent Relevant Messages"]
-        for msg in pack["recent_relevant_messages"]:
-            lines.append(_clamp_text(msg, 1600))
-            lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def cmd_context_pack(project, args):
-    agent = getattr(args, "agent", None)
-    max_comms = getattr(args, "max_comms", 3) or 3
-    pack = build_context_pack(project, agent=agent, max_comms=max_comms)
+    pack = build_start_pack(project, getattr(args, "agent", None))
     if getattr(args, "json", False):
         print(json.dumps(pack, ensure_ascii=False, indent=2))
     else:
-        print(format_context_pack(pack), end="")
+        print(json.dumps(pack, ensure_ascii=False, indent=2))
+
+
+def build_start_pack(project, agent=None):
+    """Return the complete, bounded machine startup payload."""
+    report = build_doctor_report(project)
+    if not report["ok"]:
+        repairable = bool(report["missing"]) or (
+            report.get("issues") and all(issue.startswith("derived state fields drifted") for issue in report["issues"])
+        )
+        return {
+            "ready": False,
+            "project": project,
+            "missing": [item["name"] for item in report["missing"]],
+            "issues": report.get("issues", []),
+            "action_required": "repair" if repairable else "fix_canonical_json",
+            "command": f"plow-whip --project {project} repair" if repairable else None,
+        }
+    data = load_protocol(project)
+    agents = proto.enabled_agents(data)
+    state = load_state(project)
+    agent = agent or state.get("current_agent")
+    if agent not in agents:
+        return {
+            "ready": False,
+            "project": project,
+            "agent": agent,
+            "action_required": "select_enabled_agent",
+            "enabled_agents": agents,
+        }
+    task = dict(state.get("task", {}))
+    task["owner"] = state.get("assigned_agent") or task.get("owner")
+    task["next_action"] = state.get("next_action", task.get("next_action", ""))
+    task["last_output"] = state.get("last_output", task.get("last_output", ""))
+    task["blockers"] = state.get("blockers", task.get("blockers", []))
+    task.pop("verification", None)
+    if len(task.get("last_output", "")) > 1000:
+        task["last_output"] = task["last_output"][-1000:]
+        task["last_output_truncated"] = True
+    messages = [
+        message
+        for message in _latest_targeted_blocks(_read_text(comms_file(project)), agent, limit=6)
+        if f"@{agent}" in message and "启动自检确认" not in message
+    ][-3:]
+    rule_pack = proto.compiled_rules(data, agent, task)
+    goal = state.get("goal") or None
+    goal_view = None if not goal else {
+        "id": goal.get("id"),
+        "text": goal.get("text"),
+        "status": goal.get("status"),
+        "context_summary": goal.get("context_summary", "")[:1200],
+        "progress": f"{len(goal.get('completed', []))}/{goal.get('total', 0)}",
+    }
+    pack = {
+        "ready": True,
+        "project": project,
+        "project_path": project_dir(project),
+        "agent": agent,
+        "task": task,
+        "goal": goal_view,
+        **rule_pack,
+        "messages": messages,
+        "decision_ids": task.get("decision_ids", []),
+        "memory": data.get("memory", {}),
+        "writeback": {
+            "progress": f"plow-whip --project {project} task progress --output '...' --next '...'",
+            "complete": f"plow-whip --project {project} task complete --output '...'",
+            "handoff": f"plow-whip --project {project} handoff --to <agent> --output '...' --next '...'",
+            "goal_plan": f"plow-whip --project {project} goal plan --context-summary '...' --plan-json '[{{...}}]'",
+        },
+    }
+    if "planning" in task.get("rule_tags", []):
+        pack["routing_catalog"] = routing.planner_catalog(data)
+    return pack
+
+
+def cmd_start(project, args):
+    payload = build_start_pack(project, getattr(args, "agent", None))
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def run_task_verification(project, commands):
+    """Run the task's explicit acceptance commands and stop at first failure."""
+    results = []
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=project_dir(project),
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        result = {
+            "command": command,
+            "returncode": completed.returncode,
+            "output": (completed.stdout + completed.stderr).strip()[-2000:],
+        }
+        results.append(result)
+        if completed.returncode:
+            break
+    return results
+
+
+def _archive_task_sessions(project, task):
+    if not task.get("cli_sessions"):
+        return
+    validate_identifier(task.get("id", "task"), "task")
+    atomic_write_json(os.path.join(project_memory_dir(project), "sessions", f"{task['id']}_cli_sessions.json"), {
+        "project": project,
+        "task_id": task.get("id"),
+        "title": task.get("title"),
+        "final_output": task.get("last_output", ""),
+        "archived_at": datetime.now().isoformat(timespec="seconds"),
+        "cli_sessions": task.get("cli_sessions", {}),
+    })
+
+
+def _goal_record(goal_id, text, owner=None, status="planning"):
+    return {
+        "id": goal_id, "text": text, "status": status, "preferred_owner": owner,
+        "context_summary": "", "total": 0, "completed": [], "queue": [],
+    }
+
+
+def _planning_task(goal, owner):
+    return {
+        "id": f"{goal['id']}-PLAN", "title": "Plan goal milestones", "goal_id": goal["id"],
+        "owner": owner, "status": "active",
+        "next_action": "Create 1-7 coarse milestones from the goal using roles/capabilities. If the goal already supplies enough detail, do not scan the repository or run tests during planning; inspect only named files needed to fill a concrete gap. The last milestone must be independent final acceptance.",
+        "acceptance": [
+            "Plan contains 1-7 coarse independently verifiable milestones",
+            "No broad repository read or test run when the supplied goal is sufficient",
+            "Last milestone performs independent final acceptance",
+        ],
+        "verify_commands": [], "rule_tags": ["planning"], "last_output": "", "blockers": [],
+        "decision_ids": [], "cli_sessions": {}, "required_role": "planner", "required_capabilities": [],
+    }
+
+
+def _planner_owner(data, preferred=None):
+    if preferred:
+        if preferred not in proto.enabled_agents(data):
+            raise ValueError(f"unknown planner owner: {preferred}")
+        return preferred
+    owner = routing.select_agent(
+        data, role="planner", driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+    )
+    if not owner:
+        raise ValueError("no enabled planner agent has an executable driver")
+    return owner
+
+
+def _activate_goal(state, data, goal):
+    goal["status"] = "planning"
+    owner = _planner_owner(data, goal.pop("preferred_owner", None))
+    state["goal"] = goal
+    state["task"] = _planning_task(goal, owner)
+    state["phase"] = goal["id"]
+    state["automation_enabled"] = True
+
+
+def cmd_goal(project, args):
+    state = load_state(project)
+    data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+    if args.action == "start":
+        goal_id = f"G-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        goal = _goal_record(goal_id, args.text, getattr(args, "owner", None))
+        active_goal = (state.get("goal") or {}).get("status") in ("planning", "active")
+        active_task = state.get("task", {}).get("status") == "active" and state.get("task", {}).get("id") != "T-001"
+        if (active_goal or active_task) and not getattr(args, "replace", False):
+            goal["status"] = "queued"
+            state.setdefault("goal_queue", []).append(goal)
+            state["automation_enabled"] = True
+            save_state(project, state)
+            append_comms(project, f"goal {goal_id} queued: {args.text}")
+            print(json.dumps({"project": project, "action": "queued", "goal": goal, "queue_length": len(state["goal_queue"])}, ensure_ascii=False, indent=2))
+            return
+        if getattr(args, "replace", False) and state.get("goal"):
+            replaced = dict(state["goal"])
+            replaced["status"] = "replaced"
+            state.setdefault("goal_history", []).append(replaced)
+        _activate_goal(state, data, goal)
+    elif args.action == "plan":
+        goal = state.get("goal") or {}
+        if goal.get("status") != "planning":
+            raise ValueError("goal is not waiting for a milestone plan")
+        raw = json.loads(args.plan_json)
+        if not isinstance(raw, list) or not 1 <= len(raw) <= 7:
+            raise ValueError("goal plan must contain 1 to 7 milestones")
+        if not raw[-1].get("final_acceptance"):
+            raise ValueError("last milestone must declare final_acceptance=true")
+        milestones = []
+        implementation_owners = set()
+        for index, item in enumerate(raw, 1):
+            final = index == len(raw)
+            role = proto.normalize_role(str(item.get("role") or ("reviewer" if final else "implementation")))
+            capabilities = list(dict.fromkeys(
+                str(value).strip().lower() for value in item.get("capabilities", []) if str(value).strip()
+            ))
+            owner = item.get("owner")
+            if owner and owner not in proto.enabled_agents(data):
+                raise ValueError(f"unknown milestone owner: {owner}")
+            if not owner:
+                owner = routing.select_agent(
+                    data, role=role, capabilities=capabilities,
+                    exclude_agents=implementation_owners if final else None,
+                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                )
+            if not owner:
+                raise ValueError(f"no executable agent matches role={role} capabilities={capabilities}")
+            if final and owner in implementation_owners:
+                independent_owner = routing.select_agent(
+                    data, role=role, capabilities=capabilities,
+                    exclude_agents=implementation_owners,
+                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                )
+                if independent_owner:
+                    owner = independent_owner
+            if final and implementation_owners and owner in implementation_owners:
+                raise ValueError("final acceptance requires an independent executable agent")
+            title = str(item.get("title", "")).strip()
+            acceptance = item.get("acceptance") or []
+            if not title or not acceptance:
+                raise ValueError("each milestone needs title and acceptance")
+            milestones.append({
+                "id": f"{goal['id']}-M{index}", "title": title, "goal_id": goal["id"], "owner": owner,
+                "status": "active", "next_action": item.get("next_action") or title,
+                "acceptance": acceptance, "verify_commands": item.get("verify_commands") or [],
+                "rule_tags": item.get("rule_tags") or [], "last_output": "", "blockers": [],
+                "decision_ids": [], "cli_sessions": {}, "final": final,
+                "required_role": role, "required_capabilities": capabilities,
+                "independent_acceptance": final and owner not in implementation_owners,
+            })
+            if not final:
+                implementation_owners.add(owner)
+        goal.update({"status": "active", "context_summary": args.context_summary[:1200], "total": len(milestones), "queue": milestones[1:]})
+        state["task"] = milestones[0]
+    else:
+        payload = {"project": project, "goal": state.get("goal"), "task": state.get("task")}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    save_state(project, state)
+    append_comms(project, f"goal {state['goal']['id']} {args.action}: {state['goal']['text']}")
+    print(json.dumps({"project": project, "action": args.action, "goal": state["goal"], "task": state["task"]}, ensure_ascii=False, indent=2))
+
+
+def cmd_task(project, args):
+    state = load_state(project)
+    task = state.setdefault("task", {})
+    action = args.action
+    if action == "start":
+        task_id = getattr(args, "task_id", None) or f"T-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        owner = getattr(args, "owner", None) or state.get("current_agent")
+        if owner not in get_project_agents(project):
+            print(f"Error: unknown project agent '{owner}'", file=sys.stderr)
+            sys.exit(1)
+        task = {
+            "id": task_id,
+            "title": args.title,
+            "goal": getattr(args, "goal", None) or args.title,
+            "owner": owner,
+            "status": "active",
+            "next_action": args.next or args.title,
+            "acceptance": getattr(args, "acceptance", None) or [],
+            "verify_commands": getattr(args, "verify", None) or [],
+            "rule_tags": getattr(args, "rule_tags", None) or [],
+            "last_output": "",
+            "blockers": [],
+            "decision_ids": getattr(args, "decisions", None) or [],
+            "cli_sessions": {},
+        }
+        state["current_agent"] = owner
+        state["assigned_agent"] = owner
+        state["phase"] = task_id
+    else:
+        if getattr(args, "output", None) is not None:
+            task["last_output"] = args.output
+        if getattr(args, "next", None) is not None:
+            task["next_action"] = args.next
+        if getattr(args, "acceptance", None) is not None:
+            task["acceptance"] = args.acceptance
+        if getattr(args, "verify", None) is not None:
+            task["verify_commands"] = args.verify
+        if getattr(args, "rule_tags", None) is not None:
+            task["rule_tags"] = args.rule_tags
+        if action == "block":
+            task["status"] = "blocked"
+            task["blockers"] = getattr(args, "blockers", None) or []
+        elif action == "complete":
+            verification = run_task_verification(project, task.get("verify_commands", []))
+            failed = next((item for item in verification if item["returncode"]), None)
+            task["verification"] = verification
+            if failed:
+                task["status"] = "active"
+                task["next_action"] = f"Fix verification failure: {failed['command']}"
+                task["blockers"] = []
+                task["last_output"] = "\n".join(filter(None, [
+                    task.get("last_output", ""),
+                    f"Verification failed ({failed['returncode']}): {failed['command']}",
+                    failed["output"],
+                ]))
+            else:
+                task["status"] = "done"
+                task["next_action"] = ""
+                task["blockers"] = []
+                archived_at = datetime.now().isoformat(timespec="seconds")
+                for session in task.setdefault("cli_sessions", {}).values():
+                    session["status"] = "archived"
+                    session["archived_at"] = archived_at
+        else:
+            task["status"] = "active"
+    completed_task = task
+    goal = state.get("goal") or {}
+    if action == "complete" and task.get("status") == "done" and goal.get("status") == "active":
+        goal.setdefault("completed", []).append({
+            "id": task.get("id"), "title": task.get("title"), "owner": task.get("owner"),
+            "output": task.get("last_output", "")[-500:],
+        })
+        _archive_task_sessions(project, task)
+        if goal.get("queue"):
+            task = goal["queue"].pop(0)
+            action = "advance"
+        else:
+            goal["status"] = "done"
+            if state.get("goal_queue"):
+                state.setdefault("goal_history", []).append(goal)
+                next_goal = state["goal_queue"].pop(0)
+                _activate_goal(state, load_protocol(project), next_goal)
+                task = state["task"]
+                action = "advance_goal"
+            else:
+                state["goal"] = goal
+        if action != "advance_goal":
+            state["goal"] = goal
+    elif action == "complete" and task.get("status") == "done" and state.get("goal_queue"):
+        next_goal = state["goal_queue"].pop(0)
+        _activate_goal(state, load_protocol(project), next_goal)
+        task = state["task"]
+        action = "advance_goal"
+    state["task"] = task
+    state["status"] = {"active": "in_progress"}.get(task.get("status"), task.get("status", "in_progress"))
+    state["next_action"] = task.get("next_action", "")
+    state["last_output"] = task.get("last_output", "")
+    state["blockers"] = task.get("blockers", [])
+    state["current_agent"] = task.get("owner", state.get("current_agent"))
+    state["assigned_agent"] = state["current_agent"]
+    save_state(project, state)
+    if action == "complete" and completed_task.get("status") == "done" and not goal:
+        _archive_task_sessions(project, completed_task)
+    append_comms(project, f"task {task.get('id')} {action}: {task.get('last_output') or task.get('next_action') or task.get('title', '')}")
+    payload = {"project": project, "action": action, "task": task}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Task {task.get('id')} -> {task.get('status')}")
 
 
 def cmd_list():
@@ -1264,7 +1958,7 @@ def cmd_archive(project):
     projects_dir = get_projects_dir()
     archive_dir = os.path.join(projects_dir, "by_rm", "plow-whip-archive")
     os.makedirs(archive_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     archive_name = f"{project}_{timestamp}.tar.gz"
     archive_path = os.path.join(archive_dir, archive_name)
 
@@ -1352,7 +2046,7 @@ def cmd_rotate(project, agent, args):
     with open(curr, encoding="utf-8") as f:
         content = f.read()
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     topic = args.topic or "session"
     topic_safe = topic.replace(" ", "_").replace("/", "-")[:40]
     archive_name = f"{timestamp}_{topic_safe}.md"
@@ -1382,24 +2076,27 @@ def cmd_rotate(project, agent, args):
 
 def _write_session_template(agent, project, path):
     """Write a fresh current.md for an agent."""
-    role = get_agent_label(agent)
-    assignment = get_agent_assignment(agent)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# {agent} Session — {project}\n\n")
-        f.write(f"**AI:** {role}\n")
-        if assignment:
-            f.write(f"**Assignment:** {assignment}\n")
-        f.write(f"**Started:** {datetime.now().strftime('%Y-%m-%d')}\n")
-        f.write(f"**Topic:** —\n\n")
-        f.write(f"## Previous\n- (none, new session)\n\n")
-        f.write(f"## Current Tasks\n- (check NEXT_ACTION.md)\n\n")
-        f.write(f"## Key Decisions\n- (decisions will be appended here)\n\n")
-        f.write(f"## Outputs\n- (outputs will be appended here)\n")
+    meta = {}
+    if os.path.exists(protocol_file(project)):
+        meta = load_protocol(project).get("agents", {}).get(agent, {})
+    role = meta.get("role") or get_agent_label(agent)
+    assignment = meta.get("assignment") or get_agent_assignment(agent)
+    lines = [f"# {agent} Session — {project}", "", f"**AI:** {role}"]
+    if assignment:
+        lines.append(f"**Assignment:** {assignment}")
+    lines += [
+        f"**Started:** {datetime.now().strftime('%Y-%m-%d')}", "**Topic:** —", "",
+        "## Previous", "- (none, new session)", "", "## Current Tasks",
+        "- (check the start --json payload)", "", "## Key Decisions",
+        "- (decisions will be appended here)", "", "## Outputs",
+        "- (outputs will be appended here)", "",
+    ]
+    atomic_write_text(path, "\n".join(lines))
 
 
 def cmd_sessions_overview(project):
     print(f"\n📊 Session overview (project: {project}):\n")
-    for agent in get_agents():
+    for agent in get_project_agents(project):
         curr = os.path.join(conversations_dir(project), agent, "current.md")
         if not os.path.exists(curr):
             print(f"  ⚪ {agent:8s} — not initialized")
@@ -1432,23 +2129,80 @@ def cmd_sync():
     print(f"\n🔄 Syncing framework templates to {len(projects)} project(s):\n")
     for p in projects:
         updated = []
-        # Sync CONVENTIONS.md
-        conventions_path = os.path.join(projects_dir, p, "collab", "CONVENTIONS.md")
-        if write_conventions(conventions_path, p, sync_global_only=True):
-            updated.append("CONVENTIONS.md(global)")
+        try:
+            proto.ensure(project_dir(p), p, get_agents(), get_agent_meta())
+            if proto.write_handbook(project_dir(p)):
+                updated.append("HANDBOOK.zh-CN.md")
+            _write_compat_conventions(p)
+            write_agent_manifest(p)
+        except OSError as exc:
+            print(f"  {p:20s} SKIP: {exc}")
+            continue
         # Note: memory files are project-specific, NOT synced
         status = "✅ " + ", ".join(updated) if updated else "⚪ no changes"
         print(f"  {p:20s} {status}")
     print()
 
 
+def cmd_scheduler(args):
+    from . import scheduler
+
+    auto_continue = bool(getattr(args, "auto_continue", False) or getattr(args, "auto_crack", False))
+
+    if args.action == "install":
+        payload = scheduler.install(CONFIG_DIR, args.interval, auto_continue, dry_run=args.dry_run)
+    elif args.action == "uninstall":
+        payload = scheduler.uninstall(CONFIG_DIR)
+    elif args.action == "start":
+        payload = scheduler.start(CONFIG_DIR)
+    elif args.action == "stop":
+        payload = scheduler.stop(CONFIG_DIR)
+    elif args.action == "logs":
+        payload = scheduler.logs(CONFIG_DIR, args.lines)
+    elif args.action == "doctor":
+        payload = scheduler.doctor(CONFIG_DIR)
+    elif args.action == "repair":
+        payload = scheduler.repair(CONFIG_DIR)
+    elif args.action == "run":
+        from .whip import run_once
+        payload = run_once(stale_minutes=args.stale_minutes, crack=auto_continue, auto_rotate=True, opt_in_only=auto_continue)
+    else:
+        payload = scheduler.status(CONFIG_DIR)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def cmd_inbox(args):
+    from .dispatch import read_inbox, update_inbox_task
+
+    if args.action == "list":
+        payload = read_inbox(args.agent)
+    else:
+        try:
+            payload = update_inbox_task(args.agent, args.dispatch_id, args.status, args.output or "")
+        except (KeyError, ValueError) as exc:
+            payload = {"updated": False, "error": str(exc)}
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 def main():
+    def positive_int(value):
+        number = int(value)
+        if number < 1:
+            raise argparse.ArgumentTypeError("must be at least 1")
+        return number
+
+    def project_name(value):
+        try:
+            return validate_identifier(value, "project")
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from exc
+
     parser = argparse.ArgumentParser(
         description="🪢 plow-whip — Multi-Agent Collaboration Framework / 耕田之鞭"
     )
-    parser.add_argument("--project", "-p", help="Target project name")
+    parser.add_argument("--project", "-p", type=project_name, help="Target project name")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -1468,6 +2222,11 @@ def main():
     agent_set = agent_sub.add_parser("set", help="Set an agent role or assignment")
     agent_set.add_argument("name", help="Agent name")
     agent_set.add_argument("--role", help="Role label")
+    agent_set.add_argument("--roles", nargs="+", help="Stable routing role tags")
+    agent_set.add_argument("--capabilities", nargs="*", help="Capability tags")
+    agent_set.add_argument("--driver", choices=["codex_cli", "cursor_cli", "zellij", "file"], help="Execution driver")
+    agent_set.add_argument("--priority", type=int, help="Routing priority")
+    agent_set.add_argument("--cost-tier", choices=["low", "medium", "high"], help="Token/cost tier")
     agent_set.add_argument("--assignment", help="Current assignment")
 
     # status
@@ -1476,7 +2235,51 @@ def main():
     # doctor
     doctor_parser = sub.add_parser("doctor", help="Check plow-whip mechanism and optionally repair it")
     doctor_parser.add_argument("--repair", action="store_true", help="Create missing plow-whip files without overwriting")
+    doctor_parser.add_argument("--skip-rotate", action="store_true", help="With --repair, skip automatic rotation enforcement")
     doctor_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    repair_parser = sub.add_parser("repair", help="Explicitly create or repair missing plow-whip structure")
+    repair_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    start_parser = sub.add_parser("start", help="Return the complete minimal startup payload")
+    start_parser.add_argument("--agent", help="Target agent")
+    start_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    task_parser = sub.add_parser("task", help="Atomically update the current task")
+    task_sub = task_parser.add_subparsers(dest="action", required=True)
+    task_start = task_sub.add_parser("start")
+    task_start.add_argument("--id", dest="task_id")
+    task_start.add_argument("--title", required=True)
+    task_start.add_argument("--goal")
+    task_start.add_argument("--owner")
+    task_start.add_argument("--next")
+    task_start.add_argument("--acceptance", nargs="*")
+    task_start.add_argument("--verify", nargs="*")
+    task_start.add_argument("--rule-tags", nargs="*")
+    task_start.add_argument("--decisions", nargs="*")
+    for action in ("progress", "block", "complete"):
+        item = task_sub.add_parser(action)
+        item.add_argument("--output", required=True)
+        item.add_argument("--next")
+        if action == "progress":
+            item.add_argument("--acceptance", nargs="*")
+            item.add_argument("--verify", nargs="*")
+            item.add_argument("--rule-tags", nargs="*")
+        item.add_argument("--json", action="store_true")
+        if action == "block":
+            item.add_argument("--blockers", nargs="+", required=True)
+    task_start.add_argument("--json", action="store_true")
+
+    goal_parser = sub.add_parser("goal", help="Start and run a coarse milestone goal")
+    goal_sub = goal_parser.add_subparsers(dest="action", required=True)
+    goal_start = goal_sub.add_parser("start")
+    goal_start.add_argument("text")
+    goal_start.add_argument("--owner")
+    goal_start.add_argument("--replace", action="store_true", help="Explicitly replace active work instead of queueing")
+    goal_plan = goal_sub.add_parser("plan")
+    goal_plan.add_argument("--context-summary", required=True)
+    goal_plan.add_argument("--plan-json", required=True)
+    goal_sub.add_parser("status")
 
     # handoff
     hp = sub.add_parser("handoff", help="Handoff to next agent")
@@ -1525,7 +2328,7 @@ def main():
     sub.add_parser("sessions-overview", help="All sessions overview")
 
     # context-pack
-    cp = sub.add_parser("context-pack", help="Print a minimal wakeup context pack")
+    cp = sub.add_parser("context-pack", help="Deprecated alias for start")
     cp.add_argument("--agent", help="Target agent (default: current_agent)")
     cp.add_argument("--max-comms", type=int, default=3, help="Recent relevant message blocks (default 3)")
     cp.add_argument("--json", action="store_true", help="Output JSON")
@@ -1536,7 +2339,12 @@ def main():
 
     # memory-budget — token budget for Hot/Warm/Cold memory
     mb = sub.add_parser("memory-budget", help="Show Hot/Warm/Cold token budget")
+    mb.add_argument("--enforce-rotate", action="store_true", help="Rotate overdue sessions/files when budget exceeded")
     mb.add_argument("--json", action="store_true", help="Output JSON")
+
+    rh = sub.add_parser("rotation-health", help="Show rotation thresholds and overdue files")
+    rh.add_argument("--enforce", action="store_true", help="Rotate overdue sessions/files immediately")
+    rh.add_argument("--json", action="store_true", help="Output JSON")
 
     # brain — DeepSeek 廉价大脑
     brain_parser = sub.add_parser("brain", help="DeepSeek brain for simple tasks")
@@ -1558,17 +2366,69 @@ def main():
     whip_parser.add_argument("--stale-minutes", type=int, help="Stale threshold in minutes (default 60)")
     whip_parser.add_argument("--json", action="store_true", help="Output as JSON")
     whip_parser.add_argument("--crack", action="store_true", help="CRACK! Actually dispatch tasks to agents")
-    whip_parser.add_argument("--auto-crack", action="store_true", help="Auto-crack mode: continuously scan and dispatch")
+    whip_parser.add_argument("--auto-crack", action="store_true", help="Deprecated: run one crack pass; use scheduler for repetition")
     whip_parser.add_argument("--channel", choices=["zellij", "file", "notify"], help="Force specific dispatch channel")
-    whip_parser.add_argument("--daemon", action="store_true", help="Continuous monitoring mode")
-    whip_parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval in seconds (default 300)")
+    whip_parser.add_argument("--daemon", action="store_true", help="Deprecated: run one scan; use scheduler for repetition")
+    whip_parser.add_argument("--interval", type=int, default=300, help="Deprecated compatibility option")
     whip_parser.add_argument("--force", action="store_true", help="Force dispatch even if project is not stale")
     whip_parser.add_argument("--auto-rotate", action="store_true", help="Auto-rotate sessions that exceed size thresholds")
     whip_parser.add_argument("--brain", action="store_true", help="Use DeepSeek brain for simple tasks before dispatching")
+    whip_parser.add_argument("--once", action="store_true", help="Run one locked scheduler-safe pass and exit")
+    whip_parser.add_argument("--opt-in-only", action="store_true", help="Dispatch only projects that enabled goal automation")
+
+    scheduler_parser = sub.add_parser("scheduler", help="Manage native per-user scheduling")
+    scheduler_sub = scheduler_parser.add_subparsers(dest="action", required=True)
+    scheduler_install = scheduler_sub.add_parser("install")
+    scheduler_install.add_argument("--interval", type=positive_int, default=300)
+    scheduler_install.add_argument("--auto-crack", action="store_true")
+    scheduler_install.add_argument("--auto-continue", action="store_true", help="Automatically resume stale active tasks")
+    scheduler_install.add_argument("--dry-run", action="store_true")
+    scheduler_status = scheduler_sub.add_parser("status")
+    scheduler_run = scheduler_sub.add_parser("run")
+    scheduler_run.add_argument("--auto-crack", action="store_true")
+    scheduler_run.add_argument("--auto-continue", action="store_true", help="Automatically resume stale active tasks")
+    scheduler_run.add_argument("--stale-minutes", type=int, default=60)
+    scheduler_sub.add_parser("start")
+    scheduler_sub.add_parser("stop")
+    scheduler_logs = scheduler_sub.add_parser("logs")
+    scheduler_logs.add_argument("--lines", type=int, default=40)
+    scheduler_sub.add_parser("doctor")
+    scheduler_sub.add_parser("repair")
+    scheduler_sub.add_parser("uninstall")
+
+    inbox_parser = sub.add_parser("inbox", help="Inspect or update dispatch lifecycle")
+    inbox_sub = inbox_parser.add_subparsers(dest="action", required=True)
+    inbox_list = inbox_sub.add_parser("list")
+    inbox_list.add_argument("--agent", required=True)
+    inbox_update = inbox_sub.add_parser("update")
+    inbox_update.add_argument("--agent", required=True)
+    inbox_update.add_argument("--dispatch-id", required=True)
+    inbox_update.add_argument("--status", required=True, choices=["queued", "accepted", "running", "completed", "failed"])
+    inbox_update.add_argument("--output")
+
+    cli_auth_parser = sub.add_parser("cli-auth", help="Manage Desktop auth or referenced API key pools")
+    cli_auth_sub = cli_auth_parser.add_subparsers(dest="action", required=True)
+    cli_auth_status = cli_auth_sub.add_parser("status")
+    cli_auth_status.add_argument("agent", nargs="?", choices=["codex_cli", "cursor_cli"])
+    cli_auth_mode = cli_auth_sub.add_parser("mode")
+    cli_auth_mode.add_argument("agent", choices=["codex_cli", "cursor_cli"])
+    cli_auth_mode.add_argument("mode", choices=["desktop", "pool"])
+    cli_auth_add = cli_auth_sub.add_parser("add")
+    cli_auth_add.add_argument("agent", choices=["codex_cli", "cursor_cli"])
+    cli_auth_add.add_argument("--name", required=True)
+    cli_auth_add.add_argument("--env", required=True, help="Environment variable containing the key")
+    cli_auth_add.add_argument("--model")
+    for action in ("remove", "select"):
+        item = cli_auth_sub.add_parser(action)
+        item.add_argument("agent", choices=["codex_cli", "cursor_cli"])
+        item.add_argument("--name", required=True)
+    cli_auth_failover = cli_auth_sub.add_parser("failover")
+    cli_auth_failover.add_argument("agent", choices=["codex_cli", "cursor_cli"])
+    cli_auth_failover.add_argument("value", choices=["on", "off"])
 
     # drive — Desktop 驱使 CLI（Codex / Cursor 编排者）
-    drive_parser = sub.add_parser("drive", help="Drive cursor_cli / codex_cli (for Desktop orchestrators)")
-    drive_parser.add_argument("target_agent", choices=["cursor_cli", "codex_cli"], help="CLI agent to drive")
+    drive_parser = sub.add_parser("drive", help="Drive any registered logical agent through its configured driver")
+    drive_parser.add_argument("target_agent", help="Registered logical agent to drive")
     drive_parser.add_argument("--next", help="Task description")
     drive_parser.add_argument("--prompt-file", help="Read task from file")
     drive_parser.add_argument("--from-agent", default="codex", help="Requester agent name (default: codex)")
@@ -1592,7 +2452,7 @@ def main():
         parser.print_help()
         return
 
-    # configure and list and sync don't need --project
+    # configure, list, sync, scheduler don't need --project
     if args.command == "configure":
         cmd_configure(args)
         return
@@ -1612,6 +2472,16 @@ def main():
     if args.command == "whip":
         from .whip import cmd_whip
         cmd_whip(args)
+        return
+    if args.command == "scheduler":
+        cmd_scheduler(args)
+        return
+    if args.command == "inbox":
+        cmd_inbox(args)
+        return
+    if args.command == "cli-auth":
+        from .cli_auth import cmd
+        cmd(args)
         return
     if args.command == "permit":
         cmd_permit(args)
@@ -1633,6 +2503,14 @@ def main():
         cmd_status(project)
     elif args.command == "doctor":
         cmd_doctor(project, args)
+    elif args.command == "repair":
+        cmd_repair(project, args)
+    elif args.command == "start":
+        cmd_start(project, args)
+    elif args.command == "task":
+        cmd_task(project, args)
+    elif args.command == "goal":
+        cmd_goal(project, args)
     elif args.command == "handoff":
         cmd_handoff(project, args)
     elif args.command == "reset":
@@ -1657,6 +2535,8 @@ def main():
         cmd_memory_rotate(project, args)
     elif args.command == "memory-budget":
         cmd_memory_budget(project, args)
+    elif args.command == "rotation-health":
+        cmd_rotation_health(project, args)
     elif args.command == "drive":
         from .drive import cmd_drive
         cmd_drive(project, args)

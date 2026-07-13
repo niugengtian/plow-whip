@@ -1,42 +1,106 @@
 {
   "current_agent": "codex",
-  "phase": "D-003-rollout",
-  "status": "in_progress",
+  "phase": "T-20260713190011",
+  "status": "done",
   "task_context": {
     "day": 0,
     "topic": "",
-    "project_dir": "",
-    "project_path": "/Users/niugengtian/work/plow-whip多AI协作机制/plow-whip"
+    "project_dir": ""
   },
-  "last_output": "plow-whip 鞭策：驱动全员 D-003 启动自检确认",
+  "last_output": "README 产品级首页重构完成：首屏明确产品、受众与差异；提供安装到首个可验证任务的最短路径；完整覆盖 Registry/Router/Driver、原子状态机、Goal、原生 Scheduler、真实无人值守链路与边界、CLI 认证和会话生命周期；新增完整命令索引与贡献入口。README 内部锚点和本地链接已校验。",
   "files_changed": [],
-  "verify_commands": [],
+  "verify_commands": [
+    "python3 -m unittest discover -s tests -q",
+    "python3 -m plow_whip.agent_flow --help"
+  ],
   "assigned_agent": "codex",
   "blockers": [],
-  "last_wake_hash": "cb1728e027428094320a2e2a2d1353c255b4f1aa272491253e3dccfdbfe742bc",
-  "last_woken_at": "2026-07-09T17:25:41",
+  "last_wake_hash": "2c59ed653bda274e5e7c2513d9d088b01aa275ca00075359d4247ccc8fcbc21b",
+  "last_woken_at": "2026-07-13T19:06:09",
   "wake_count": 1,
-  "next_action": "在 AGENT_COMMS.md Acknowledgments 区完成启动自检确认（读 CONVENTIONS.md P0 + 写会话记忆 + 回复确认）",
-  "updated_at": "2026-07-09T17:05:10",
-  "agents": [
-    "codex",
-    "cursor",
-    "cursor_cli",
-    "codex_cli",
-    "reviewer"
-  ],
-  "agent_meta": {
-    "cursor": {
-      "role": "Cursor Desktop (替代 Qoder CN Desktop)",
-      "assignment": "桌面打工仔"
+  "next_action": "",
+  "updated_at": "2026-07-13T19:06:09",
+  "project_id": "plow-whip",
+  "project_root": ".",
+  "task": {
+    "id": "T-20260713190011",
+    "title": "重构 plow-whip README 为产品级首页",
+    "goal": "重构 plow-whip README 为产品级首页",
+    "owner": "codex",
+    "status": "done",
+    "next_action": "",
+    "acceptance": [
+      "首屏能够在一分钟内解释产品、受众和差异",
+      "提供从安装到首个可验证任务的最短成功路径",
+      "完整保留 Registry Router Driver、状态机、Goal、Scheduler、CLI 会话和认证等关键能力",
+      "所有命令与当前 CLI 一致",
+      "Markdown 结构清晰且内部锚点有效"
+    ],
+    "verify_commands": [
+      "python3 -m unittest discover -s tests -q",
+      "python3 -m plow_whip.agent_flow --help"
+    ],
+    "rule_tags": [],
+    "last_output": "README 产品级首页重构完成：首屏明确产品、受众与差异；提供安装到首个可验证任务的最短路径；完整覆盖 Registry/Router/Driver、原子状态机、Goal、原生 Scheduler、真实无人值守链路与边界、CLI 认证和会话生命周期；新增完整命令索引与贡献入口。README 内部锚点和本地链接已校验。",
+    "blockers": [],
+    "decision_ids": [],
+    "cli_sessions": {
+      "codex_cli": {
+        "session_id": "019f5b23-fefb-7fd0-9388-453fd568cc3f",
+        "status": "archived",
+        "created_at": "2026-07-13T19:01:57",
+        "auth_profile": "desktop",
+        "model": null,
+        "archived_at": "2026-07-13T19:05:48"
+      }
     },
-    "cursor_cli": {
-      "role": "Cursor CLI (替代 Qoder CLI)",
-      "assignment": "CLI 打工仔"
-    },
-    "reviewer": {
-      "role": "Reviewer",
-      "assignment": "Review implementation and risks"
+    "verification": [
+      {
+        "command": "python3 -m unittest discover -s tests -q",
+        "returncode": 0,
+        "output": "\n📋 Phase: P\n📌 Output: Done\n➡️  codex please: Next\n\n\u0007   📝 qoder session: 17 lines, 0.3KB — no rotation needed\n\n🆕 Project 'DoneProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpdd5qclq6/projects/DoneProject/collab/AGENT_STATE.json\n   Run: plow-whip --project DoneProject start --agent qoder --json\n\n\n🆕 Project 'ProjectA' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectA/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectA start --agent qoder --json\n\n\n🆕 Project 'ProjectB' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpwcm2fq38/projects/ProjectB/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectB start --agent qoder --json\n\n\n🆕 Project 'TestProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpnx0evoth/projects/TestProject/collab/AGENT_STATE.json\n   Run: plow-whip --project TestProject start --agent qoder --json\n\nwarning: continuous whip flags are deprecated; install the native scheduler for repetition\n----------------------------------------------------------------------\nRan 130 tests in 3.615s\n\nOK"
+      },
+      {
+        "command": "python3 -m plow_whip.agent_flow --help",
+        "returncode": 0,
+        "output": "-auth,drive,permit}\n    configure           Configure plow-whip\n    list                List all active projects\n    agent               List or edit agents\n    status              View project status\n    doctor              Check plow-whip mechanism and optionally repair it\n    repair              Explicitly create or repair missing plow-whip\n                        structure\n    start               Return the complete minimal startup payload\n    task                Atomically update the current task\n    goal                Start and run a coarse milestone goal\n    handoff             Handoff to next agent\n    reset               Reset project state\n    init                Initialize new project\n    new                 Create a new project and initialize plow-whip\n    archive             Archive completed project\n    watch               Watch project state changes\n    session             View agent session status\n    rotate              Rotate agent session\n    sessions-overview   All sessions overview\n    context-pack        Deprecated alias for start\n    memory-rotate       Check and rotate all collab/memory files\n    memory-budget       Show Hot/Warm/Cold token budget\n    rotation-health     Show rotation thresholds and overdue files\n    brain               DeepSeek brain for simple tasks\n    sync                Sync framework templates to all projects\n    bind-tab            Bind project to zellij tab\n    whip                plow-whip — actively drive agents to work\n    scheduler           Manage native per-user scheduling\n    inbox               Inspect or update dispatch lifecycle\n    cli-auth            Manage Desktop auth or referenced API key pools\n    drive               Drive any registered logical agent through its\n                        configured driver\n    permit              Set dispatch permission\n\noptional arguments:\n  -h, --help            show this help message and exit\n  --project PROJECT, -p PROJECT\n                        Target project name"
+      }
+    ],
+    "execution": {
+      "dispatch_id": "DP-061b107fc9bc",
+      "logical_owner": "codex",
+      "executor": "codex",
+      "driver": "codex_cli",
+      "status": "completed",
+      "session_id": "019f5b23-fefb-7fd0-9388-453fd568cc3f"
     }
-  }
+  },
+  "revision": 87,
+  "last_dispatch_id": "DP-061b107fc9bc",
+  "last_wake_status": "completed",
+  "automation_enabled": true,
+  "goal": {
+    "id": "G-20260713141746759125",
+    "text": "只读完成 Registry Router Driver 多 Agent E2E 验证。必须规划 2 个粗里程碑：第一里程碑 role=e2e-worker capabilities=e2e-readonly，仅核对 README 包含 Registry、Router、Driver，并运行 python3 -m unittest tests.test_routing，随后 task complete；第二里程碑 role=e2e-auditor capabilities=e2e-review，独立复核协议 schema=4、第一里程碑结果并再次运行 python3 -m unittest tests.test_routing，随后 task complete，且 final_acceptance=true。禁止修改项目文件。",
+    "status": "done",
+    "context_summary": "只读完成 Registry、Router、Driver 多 Agent E2E 验证；计划严格分为执行核对与独立终验两个粗里程碑，禁止修改项目文件。",
+    "total": 2,
+    "completed": [
+      {
+        "id": "G-20260713141746759125-M1",
+        "title": "只读核对 Registry、Router、Driver 并验证路由测试",
+        "owner": "e2e-worker",
+        "output": "M1 已完成：只读确认 README.md 包含 Registry、Router、Driver；python3 -m unittest tests.test_routing 运行 4 项测试并全部通过（OK）；未修改项目文件。"
+      },
+      {
+        "id": "G-20260713141746759125-M2",
+        "title": "独立复核协议 schema=4 与首里程碑结果并执行最终验收",
+        "owner": "e2e-auditor",
+        "output": "最终验收通过：M2 verify_commands 已修正；自动验证确认 collab/AGENT_PROTOCOL.json schema_version=4，且 python3 -m unittest tests.test_routing 运行 4 项测试全部通过。"
+      }
+    ],
+    "queue": []
+  },
+  "goal_queue": [],
+  "goal_history": []
 }
