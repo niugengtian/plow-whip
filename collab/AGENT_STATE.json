@@ -1,42 +1,104 @@
 {
-  "current_agent": "codex",
-  "phase": "D-003-rollout",
-  "status": "in_progress",
+  "current_agent": "e2e-auditor",
+  "phase": "G-20260713141746759125",
+  "status": "done",
   "task_context": {
     "day": 0,
     "topic": "",
-    "project_dir": "",
-    "project_path": "/Users/niugengtian/work/plow-whip多AI协作机制/plow-whip"
+    "project_dir": ""
   },
-  "last_output": "plow-whip 鞭策：驱动全员 D-003 启动自检确认",
+  "last_output": "最终验收通过：M2 verify_commands 已修正；自动验证确认 collab/AGENT_PROTOCOL.json schema_version=4，且 python3 -m unittest tests.test_routing 运行 4 项测试全部通过。",
   "files_changed": [],
-  "verify_commands": [],
-  "assigned_agent": "codex",
-  "blockers": [],
-  "last_wake_hash": "cb1728e027428094320a2e2a2d1353c255b4f1aa272491253e3dccfdbfe742bc",
-  "last_woken_at": "2026-07-09T17:25:41",
-  "wake_count": 1,
-  "next_action": "在 AGENT_COMMS.md Acknowledgments 区完成启动自检确认（读 CONVENTIONS.md P0 + 写会话记忆 + 回复确认）",
-  "updated_at": "2026-07-09T17:05:10",
-  "agents": [
-    "codex",
-    "cursor",
-    "cursor_cli",
-    "codex_cli",
-    "reviewer"
+  "verify_commands": [
+    "python3 -c \"import json; from pathlib import Path; assert json.loads(Path(\\\"collab/AGENT_PROTOCOL.json\\\").read_text())[\\\"schema_version\\\"] == 4\"",
+    "python3 -m unittest tests.test_routing"
   ],
-  "agent_meta": {
-    "cursor": {
-      "role": "Cursor Desktop (替代 Qoder CN Desktop)",
-      "assignment": "桌面打工仔"
+  "assigned_agent": "e2e-auditor",
+  "blockers": [],
+  "last_wake_hash": "29daa6cf3afe4a36746e0ebc5f1de7b93c1a9158a91cff47324c52ce8b2fecaa",
+  "last_woken_at": "2026-07-13T14:30:29",
+  "wake_count": 1,
+  "next_action": "",
+  "updated_at": "2026-07-13T14:30:11",
+  "project_id": "plow-whip",
+  "project_root": ".",
+  "task": {
+    "id": "G-20260713141746759125-M2",
+    "title": "独立复核协议 schema=4 与首里程碑结果并执行最终验收",
+    "owner": "e2e-auditor",
+    "status": "done",
+    "next_action": "",
+    "acceptance": [
+      "由未参与第一里程碑的独立审计 Agent 复核协议 schema=4",
+      "独立复核第一里程碑的只读核对结果和测试结果",
+      "再次运行 python3 -m unittest tests.test_routing 且测试通过",
+      "完成后使用 plow-whip task complete 提交最终验收结果",
+      "不修改任何项目文件"
+    ],
+    "verify_commands": [
+      "python3 -c \"import json; from pathlib import Path; assert json.loads(Path(\\\"collab/AGENT_PROTOCOL.json\\\").read_text())[\\\"schema_version\\\"] == 4\"",
+      "python3 -m unittest tests.test_routing"
+    ],
+    "rule_tags": [],
+    "last_output": "最终验收通过：M2 verify_commands 已修正；自动验证确认 collab/AGENT_PROTOCOL.json schema_version=4，且 python3 -m unittest tests.test_routing 运行 4 项测试全部通过。",
+    "blockers": [],
+    "decision_ids": [],
+    "cli_sessions": {
+      "codex_cli": {
+        "session_id": "019f5a27-4181-7232-ba43-0b8586a85d6e",
+        "status": "archived",
+        "created_at": "2026-07-13T14:26:03",
+        "auth_profile": "desktop",
+        "model": null,
+        "archived_at": "2026-07-13T14:30:11"
+      }
     },
-    "cursor_cli": {
-      "role": "Cursor CLI (替代 Qoder CLI)",
-      "assignment": "CLI 打工仔"
-    },
-    "reviewer": {
-      "role": "Reviewer",
-      "assignment": "Review implementation and risks"
-    }
-  }
+    "final": true,
+    "required_role": "e2e-auditor",
+    "required_capabilities": [
+      "e2e-review"
+    ],
+    "independent_acceptance": true,
+    "verification": [
+      {
+        "command": "python3 -c \"import json; from pathlib import Path; assert json.loads(Path(\\\"collab/AGENT_PROTOCOL.json\\\").read_text())[\\\"schema_version\\\"] == 4\"",
+        "returncode": 0,
+        "output": ""
+      },
+      {
+        "command": "python3 -m unittest tests.test_routing",
+        "returncode": 0,
+        "output": "....\n----------------------------------------------------------------------\nRan 4 tests in 0.001s\n\nOK"
+      }
+    ],
+    "goal_id": "G-20260713141746759125"
+  },
+  "revision": 69,
+  "last_dispatch_id": "DP-a66e7b3c3d4c",
+  "last_wake_status": "completed",
+  "automation_enabled": true,
+  "goal": {
+    "id": "G-20260713141746759125",
+    "text": "只读完成 Registry Router Driver 多 Agent E2E 验证。必须规划 2 个粗里程碑：第一里程碑 role=e2e-worker capabilities=e2e-readonly，仅核对 README 包含 Registry、Router、Driver，并运行 python3 -m unittest tests.test_routing，随后 task complete；第二里程碑 role=e2e-auditor capabilities=e2e-review，独立复核协议 schema=4、第一里程碑结果并再次运行 python3 -m unittest tests.test_routing，随后 task complete，且 final_acceptance=true。禁止修改项目文件。",
+    "status": "done",
+    "context_summary": "只读完成 Registry、Router、Driver 多 Agent E2E 验证；计划严格分为执行核对与独立终验两个粗里程碑，禁止修改项目文件。",
+    "total": 2,
+    "completed": [
+      {
+        "id": "G-20260713141746759125-M1",
+        "title": "只读核对 Registry、Router、Driver 并验证路由测试",
+        "owner": "e2e-worker",
+        "output": "M1 已完成：只读确认 README.md 包含 Registry、Router、Driver；python3 -m unittest tests.test_routing 运行 4 项测试并全部通过（OK）；未修改项目文件。"
+      },
+      {
+        "id": "G-20260713141746759125-M2",
+        "title": "独立复核协议 schema=4 与首里程碑结果并执行最终验收",
+        "owner": "e2e-auditor",
+        "output": "最终验收通过：M2 verify_commands 已修正；自动验证确认 collab/AGENT_PROTOCOL.json schema_version=4，且 python3 -m unittest tests.test_routing 运行 4 项测试全部通过。"
+      }
+    ],
+    "queue": []
+  },
+  "goal_queue": [],
+  "goal_history": []
 }

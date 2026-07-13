@@ -13,6 +13,8 @@ inbox_watcher.py — Qoder CN 会话唤醒器
     python3 -m plow_whip.inbox_watcher --agent qoder --interval 5
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -21,10 +23,14 @@ import sys
 import time
 from datetime import datetime
 
-INBOX_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip", "inbox")
+from .io_utils import atomic_write_json, file_lock
+
+INBOX_DIR = os.path.join(os.environ.get("PLOW_WHIP_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".plow-whip")), "inbox")
 
 
 def get_inbox_file(agent: str) -> str:
+    if not isinstance(agent, str) or not agent.strip() or agent in (".", "..") or "/" in agent or "\\" in agent or "\x00" in agent:
+        raise ValueError(f"invalid agent name: {agent!r}")
     return os.path.join(INBOX_DIR, f"{agent}.json")
 
 
@@ -37,6 +43,25 @@ def read_inbox(agent: str) -> list:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return []
+
+
+def write_inbox(agent: str, tasks: list) -> None:
+    os.makedirs(INBOX_DIR, exist_ok=True)
+    atomic_write_json(get_inbox_file(agent), tasks)
+
+
+def accept_next_task(agent: str) -> dict | None:
+    inbox_file = get_inbox_file(agent)
+    os.makedirs(INBOX_DIR, exist_ok=True)
+    with file_lock(inbox_file + ".lock"):
+        tasks = read_inbox(agent)
+        for task in tasks:
+            if task.get("status") in ("pending", "queued"):
+                task["status"] = "accepted"
+                task["accepted_at"] = datetime.now().isoformat(timespec="seconds")
+                write_inbox(agent, tasks)
+                return task
+    return None
 
 
 def bring_qoder_to_foreground():
@@ -57,7 +82,10 @@ def send_notification(agent: str, task: dict):
     prompt = task.get("prompt", "新任务")[:100]
     message = f"[{project}] {prompt}"
     
-    script = f'display notification "{message}" with title "🪢 耕田之鞭 — {agent} 被鞭了!" sound name "Glass"'
+    def apple_string(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+    script = f"display notification {apple_string(message)} with title {apple_string(f'🪢 耕田之鞭 — {agent} 被鞭了!')} sound name \"Glass\""
     try:
         subprocess.run(
             ["osascript", "-e", script],
@@ -103,11 +131,9 @@ def watch_inbox(agent: str, interval: float):
                 mtime = os.path.getmtime(inbox_file)
                 if mtime != last_mtime:
                     last_mtime = mtime
-                    tasks = read_inbox(agent)
-                    pending = [t for t in tasks if t.get("status") == "pending"]
-                    
-                    if pending:
-                        task = pending[0]  # 取第一个待办
+                    task = accept_next_task(agent)
+
+                    if task:
                         print_alert(agent, task)
                         send_notification(agent, task)
                         bring_qoder_to_foreground()

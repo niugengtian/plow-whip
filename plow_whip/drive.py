@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 """
-drive.py — Desktop 编排者驱使 CLI agent（供 Codex / Cursor Desktop 调用）
+drive.py — 让逻辑 Agent 通过其注册的执行 Driver 工作
 
 用法:
-    plow-whip --project MyProject drive cursor_cli --next "实现登录 API"
-    plow-whip --project MyProject drive cursor_cli --status
-    plow-whip --project MyProject drive codex_cli --next "写单元测试"
+    plow-whip --project MyProject drive backend-primary --next "实现登录 API"
+    plow-whip --project MyProject drive backend-primary --status
 
-默认后台启动 CLI + 写入 inbox 双保险；立即返回 log 路径与盯梢命令。
+统一通过 dispatch 启动或恢复任务绑定的 CLI 会话，并写入 inbox 生命周期。
 """
 
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import sys
-from datetime import datetime
+import uuid
 
 from . import agent_flow as af
-from .dispatch import _dispatch_file, dispatch, read_inbox
+from .dispatch import dispatch, read_inbox
 
 DEFAULT_LOG_DIR = "/tmp/plow-whip-logs"
-CLI_AGENTS = ("cursor_cli", "codex_cli")
-
-
 def resolve_project_path(project: str, override: str | None = None) -> str:
     """解析项目根路径：--project-path > 配置目录 > cwd > 环境变量。"""
     if override:
@@ -47,58 +41,30 @@ def build_drive_prompt(
     task: str,
     requested_by: str = "codex",
     project_path: str | None = None,
+    dispatch_id: str | None = None,
 ) -> str:
     """生成给 CLI agent 的短 prompt（附路径，不贴全文）。"""
     project_path = project_path or resolve_project_path(project)
-    role_hint = {
-        "cursor_cli": "Cursor CLI 打工仔",
-        "codex_cli": "Codex CLI Code Owner",
-    }.get(target_agent, target_agent)
+    role_hint = target_agent
+    if os.path.exists(af.protocol_file(project)):
+        role_hint = af.load_protocol(project).get("agents", {}).get(target_agent, {}).get("role", target_agent)
+    dispatch_id = dispatch_id or "<dispatch-id>"
 
     lines = [
         f"plow-whip drive: {project} 项目 — {requested_by} 请你（{target_agent} / {role_hint}）执行。",
         "",
         f"任务: {task.strip()}",
         "",
-        "启动自检（若未做）:",
-        f"  1. 优先运行: python3 -m plow_whip.agent_flow --project {project} context-pack --agent {target_agent}",
-        f"  2. 读 {project_path}/collab/CONVENTIONS.md（先遵守 P0 by_rm，禁止 rm）",
-        f"  3. 只在 context-pack 不够时读 AGENT_COMMS.md / DECISIONS.md 原文",
+        "唯一启动入口:",
+        f"  python3 -m plow_whip.agent_flow --project {project} start --agent {target_agent} --json",
         "",
         "完成后:",
-        "  1. 写进度到 collab/AGENT_COMMS.md",
-        "  2. plow-whip handoff（如需要）",
-        f"  3. 清空 ~/.plow-whip/inbox/{target_agent}.json",
+        f"  1. plow-whip --project {project} task progress --output '...' --next '...'",
+        f"  2. 当前里程碑完成时运行 plow-whip --project {project} task complete --output '...'（系统验收并自动接力）",
+        f"  3. 若当前任务是 PLAN，运行 start --json 返回的 goal_plan 命令建立 1-7 个里程碑",
+        "  投递 lifecycle 由父调度器回写，不要在子 Agent 内重复更新 inbox。",
     ]
     return "\n".join(lines)
-
-
-def _log_path(log_dir: str, agent: str) -> str:
-    os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(log_dir, f"{agent}_{ts}.log")
-
-
-def _cursor_cli_cmd(project_path: str, prompt: str) -> list[str] | None:
-    agent_bin = shutil.which("cursor-agent")
-    if not agent_bin:
-        return None
-    return [
-        agent_bin, "--print", "--force", "--trust",
-        "--workspace", project_path, prompt,
-    ]
-
-
-def _codex_cli_cmd(project_path: str, prompt: str) -> list[str]:
-    npx = shutil.which("npx") or "npx"
-    return [
-        npx, "-y", "@openai/codex",
-        "-a", "never",
-        "-s", "workspace-write",
-        "-C", project_path,
-        "exec", "--ephemeral",
-        prompt,
-    ]
 
 
 def spawn_cli_background(
@@ -108,50 +74,15 @@ def spawn_cli_background(
     log_dir: str = DEFAULT_LOG_DIR,
     project_path: str | None = None,
 ) -> dict:
-    """后台启动 CLI 进程，日志写入文件。立即返回，不阻塞。"""
-    project_path = project_path or resolve_project_path(project)
-    if not os.path.isdir(project_path):
-        return {"success": False, "detail": f"项目路径不存在: {project_path}"}
-
-    log_file = _log_path(log_dir, target_agent)
-    if target_agent == "cursor_cli":
-        cmd = _cursor_cli_cmd(project_path, prompt)
-        if not cmd:
-            return {"success": False, "detail": "cursor-agent 未安装"}
-    elif target_agent == "codex_cli":
-        cmd = _codex_cli_cmd(project_path, prompt)
-    else:
-        return {"success": False, "detail": f"不支持的 CLI agent: {target_agent}"}
-
-    with open(log_file, "ab") as lf:
-        lf.write(f"=== plow-whip drive start {datetime.now().isoformat()} ===\n".encode())
-    log_fd = open(log_file, "ab")
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=project_path,
-            stdout=log_fd,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        log_fd.close()
-        return {"success": False, "detail": str(exc)}
-
-    # 父进程关闭 fd；子进程已继承
-    log_fd.close()
-
+    """Legacy entrypoint: direct spawning would bypass task/session binding."""
     return {
-        "success": True,
-        "pid": proc.pid,
-        "log_file": log_file,
-        "cmd": " ".join(cmd[:4]) + " ...",
+        "success": False,
+        "detail": "direct background spawn disabled; use dispatch() so the task session ID is captured",
     }
 
 
 def cmd_drive(project: str, args) -> None:
-    """drive 子命令：驱使 cursor_cli / codex_cli。"""
+    """Drive any registered logical Agent through its configured Driver."""
     target = args.target_agent
 
     if getattr(args, "status", False):
@@ -171,47 +102,34 @@ def cmd_drive(project: str, args) -> None:
 
     requested_by = getattr(args, "from_agent", None) or "codex"
     project_path = resolve_project_path(project, getattr(args, "project_path", None))
+    dispatch_id = f"DP-{uuid.uuid4().hex[:12]}"
     prompt = build_drive_prompt(
-        project, target, task, requested_by=requested_by, project_path=project_path,
+        project, target, task, requested_by=requested_by, project_path=project_path, dispatch_id=dispatch_id,
     )
     channel = getattr(args, "channel", "auto") or "auto"
-    log_dir = getattr(args, "log_dir", DEFAULT_LOG_DIR) or DEFAULT_LOG_DIR
-    foreground = getattr(args, "foreground", False)
 
     print(f"\n🪢 plow-whip drive → {target} (project: {project})")
     print(f"📋 任务: {task[:120]}{'...' if len(task) > 120 else ''}")
     print(f"📤 请求方: {requested_by}")
     print(f"📍 路径: {project_path}\n")
 
-    # 1) 始终写 inbox（Codex 可只靠 file 通道派活）
-    inbox_result = _dispatch_file(target, prompt, project)
-    print(f"  [{'OK' if inbox_result['success'] else 'FAIL'}] inbox: {inbox_result['detail']}")
-
-    spawn_result = None
-    if channel in ("auto", "cursor_cli", "codex_cli") and not foreground:
-        if channel == "auto" or channel == target:
-            spawn_result = spawn_cli_background(
-                target, project, prompt, log_dir, project_path=project_path,
-            )
-            if spawn_result["success"]:
-                print(f"  [OK] background: pid={spawn_result['pid']}")
-                print(f"       log: {spawn_result['log_file']}")
-            else:
-                print(f"  [WARN] background: {spawn_result['detail']}")
-
-    if foreground:
-        force = target if channel in ("auto", target) else channel
-        if force in ("cursor_cli", "codex_cli"):
-            result = dispatch(target, project, prompt, force_channel=force)
-            status = "OK" if result["success"] else "FAIL"
-            print(f"  [{status}] foreground/{result['channel']}: {result['detail']}")
-            if result.get("output"):
-                print(result["output"][:500])
-        else:
-            print(f"  [SKIP] foreground 需要 cursor_cli 或 codex_cli 通道")
+    force = None if channel == "auto" else channel
+    result = dispatch(
+        target,
+        project,
+        prompt,
+        force_channel=force,
+        dispatch_id=dispatch_id,
+    )
+    status = "OK" if result["success"] else "FAIL"
+    print(f"  [{status}] {result['channel']}: {result['detail']}")
+    if result.get("session_id"):
+        print(f"       session: {result['session_id']}")
+    if result.get("output"):
+        print(result["output"][-500:])
 
     print("\n📌 盯结果（省 token）:")
-    print(f"  sleep 60 && tail -10 {log_dir}/{target}_*.log 2>/dev/null | tail -10")
+    print(f"  plow-whip inbox list --agent {target}")
     print(f"  plow-whip --project {project} drive {target} --status")
     print(f"  plow-whip --project {project} status")
     print()
@@ -243,7 +161,7 @@ def cmd_drive_status(project: str, target_agent: str, log_dir: str = DEFAULT_LOG
         print(f"📝 日志目录不存在: {log_dir}")
 
     # inbox
-    pending = [t for t in read_inbox(target_agent) if t.get("status") == "pending"]
+    pending = [t for t in read_inbox(target_agent) if t.get("status") in ("pending", "queued")]
     print(f"\n📥 inbox pending: {len(pending)} 条")
 
     # 状态机

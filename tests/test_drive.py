@@ -42,10 +42,10 @@ class DriveTest(unittest.TestCase):
         self.assertIn("cursor_cli", prompt)
         self.assertIn("codex", prompt)
         self.assertIn("实现登录 API", prompt)
-        self.assertIn("context-pack --agent cursor_cli", prompt)
-        self.assertIn("CONVENTIONS.md", prompt)
-        self.assertIn("P0 by_rm", prompt)
-        self.assertIn("inbox/cursor_cli.json", prompt)
+        self.assertIn("start --agent cursor_cli --json", prompt)
+        self.assertNotIn("CONVENTIONS.agent.md", prompt)
+        self.assertNotIn("inbox update --agent", prompt)
+        self.assertIn("父调度器回写", prompt)
 
     def test_drive_status_runs_without_error(self):
         log_dir = os.path.join(self.tmpdir, "logs")

@@ -1,326 +1,281 @@
-# 🪢 plow-whip
+# plow-whip（耕田之鞭）
 
-> **v1.0.0** — 多 Agent 协作的鞭策引擎 / Multi-Agent Collaboration Whip Engine
+面向多 Agent 项目的低 token 协作状态机。核心约束是：**一个协议真源、一个状态真源、一个启动入口**。
 
-[English](#english) | [中文](#chinese)
+## 安装
 
----
-
-## 中文
-
-### 简介
-
-plow-whip（耕田之鞭）是一个多 Agent 协作框架，管理**可配置 Agent 阵容**，通过 **whip（耕田之鞭）** 驱动摸鱼 Agent，用 **DeepSeek 廉价大脑** 处理简单任务，实现高效项目交付。
-
-默认情况下，Agent 不允许自行创建或调用子智能体；除非用户在当前任务中临时明确指定，所有跨 Agent 作业都必须通过 plow-whip 的三层记忆、留言板、状态机和 handoff/drive 机制接力，避免记忆断层。
-
-默认情况下，Agent 只能读取和修改当前项目根目录内的文件；不得擅自修改全局配置、其他项目目录、其他项目 agent 会话或全局 agent 阵容。
-
-`plow-whip sync` 只同步全局原则块；项目原则保留在各项目本地，并优先于全局原则。
-
-### 架构
-
-```
-┌─────────────────────────────────────────────────┐
-│                    plow-whip                     │
-├──────────────┬──────────────┬───────────────────┤
-│   whip.py    │   brain.py   │    dispatch.py    │
-│  (耕田之鞭)  │ (DeepSeek大脑)│   (投递通道)      │
-├──────────────┴──────────────┴───────────────────┤
-│               Configurable Agents                │
-│  planner / builder / reviewer / ...              │
-├─────────────────────────────────────────────────┤
-│            memory-rotate 自动轮转                │
-│    Hot → Warm → Cold 多层记忆                   │
-└─────────────────────────────────────────────────┘
-```
-
-### 快速开始
+要求 Python 3.10+。
 
 ```bash
-# 安装
-pip install plow-whip
+python3 -m pip install -e .
+plow-whip configure --projects-dir /absolute/path/to/projects --agents codex codex_cli reviewer
+```
 
-# 初始化项目
-plow-whip --project MyProject init
+## 唯一启动入口
 
-# 新建项目并一键接入 plow-whip 规则
-plow-whip --project MyProject new --owner codex --first-action "clarify requirements"
+Agent 进入项目只运行：
 
-# 查看状态
-plow-whip --project MyProject status
+```bash
+plow-whip --project MyProject start --agent codex --json
+```
 
-# 进入项目/新会话第一步：检查 plow-whip 机制，缺失则建立
-plow-whip --project MyProject doctor --repair
+返回当前任务、有效规则、定向消息、相关决策 ID 和回写命令。正常情况下不再读取完整 Markdown。
 
-# 生成最小唤醒上下文包，避免读全文
-plow-whip --project MyProject context-pack --agent codex
+规则按四个维度管理：`scope=global|project`、`priority=required|important`、`origin=local|inherited|derived`、`enforcement=block|require_approval|verify|warn|inform`。`start --json` 每次返回全部 `mandatory_rules`，并按 Agent 与任务 `rule_tags` 返回命中的 `important_rules`；需要完整细则时只返回定向 `required_context`。派生启动规则保留 `derived_from` 和 `source_origin`，`rules_meta.effective_hash` 用于识别规则是否变化。
 
-# 检查 Hot/Warm/Cold 记忆 token 预算
-plow-whip --project MyProject memory-budget
+日常接力不重复读取 `CONVENTIONS.md` 或 `CONVENTIONS.agent.md`；安全约束由编译后的启动规则包承载。首次进入、规则哈希变化、命中高风险规则或专项审计时，才按 `required_context` 读取真源中的指定细则。
 
-# 挥舞耕田之鞭 — 扫描摸鱼 Agent
-plow-whip whip
+如果结构缺失：
 
-# 实际投递 + 启用 DeepSeek 大脑
-plow-whip whip --crack --brain
+```bash
+plow-whip --project MyProject doctor --json   # 只读检查
+plow-whip --project MyProject repair --json   # 显式修复
+```
 
-# 持续自动挥舞 + 自动轮转
-plow-whip whip --auto-crack --auto-rotate
+`doctor --repair` 仍作为旧调用兼容入口，但不会隐式轮转内容。
 
-# 使用 DeepSeek 处理简单任务
-plow-whip brain "写一个 Python 函数判断回文"
+`doctor` 同时校验协议 JSON、状态 JSON、task owner 和派生字段一致性；损坏的 canonical JSON 不会被 repair 静默覆盖。
 
-# 一次检查所有记忆文件健康状态
+## 项目文件
+
+```text
+collab/
+├── AGENT_PROTOCOL.json   # 英文机器协议与项目 Agent 阵容，唯一协议真源
+├── HANDBOOK.zh-CN.md     # 从协议单向生成的中文手册
+├── AGENT_STATE.json      # 当前任务与运行状态，唯一状态真源
+├── AGENTS.md             # 从协议派生的人类阵容表
+├── AGENT_COMMS.md        # 近期定向消息，写入后自动检查轮转
+├── CONVENTIONS.agent.md  # 旧工具兼容指针
+├── CONVENTIONS.md        # 旧工具兼容指针
+├── conversations/        # Agent 会话与归档
+└── memory/               # 决策和历史归档（Cold）
+```
+
+新项目的必要 memory 结构只有 `DECISIONS.md` 与 `sessions/`；旧版 `NEXT_ACTION.md`、`CURRENT_STATUS.md`、`ROADMAP.md` 可继续保留，但不参与启动和 doctor 就绪判定。
+
+全局配置只为新项目提供默认 Agent 阵容。项目初始化后，阵容以项目自己的 `AGENT_PROTOCOL.json` 为准。
+
+## Registry、Router 与 Driver
+
+Agent 名称只表示长期职责身份，不再绑定 Cursor 或 Codex。项目 Registry 为每个逻辑 Agent 保存：
+
+```json
+{
+  "backend-primary": {
+    "role": "Backend Owner",
+    "roles": ["backend", "implementation"],
+    "capabilities": ["python", "api"],
+    "driver": "cursor_cli",
+    "priority": 80,
+    "cost_tier": "low",
+    "assignment": "Own backend delivery",
+    "enabled": true
+  }
+}
+```
+
+可执行 Driver 是封闭集合：`cursor_cli`、`codex_cli`、`zellij`、`file`。Router 只根据 `role + capabilities + enabled + priority + cost_tier + driver availability` 做确定性选择；同优先级保持 Registry 顺序。旧 v3 配置会无损迁移为 v4：旧 `role` 推导为稳定的 `roles` 标签，并补齐 Driver、优先级和成本档。
+
+```bash
+plow-whip --project MyProject agent set backend-primary \
+  --role "Backend Owner" --roles backend implementation \
+  --capabilities python api --driver cursor_cli \
+  --priority 80 --cost-tier low --assignment "Own backend delivery"
+
+plow-whip --project MyProject agent set backend-backup \
+  --role "Backend Backup" --roles backend implementation \
+  --capabilities python api --driver codex_cli --priority 70
+```
+
+执行结果明确区分 `logical_owner`、`executor` 和 `driver`。主 Agent 的 Driver 不可用或执行失败时，只在同职责、满足同能力的 Agent 中接力，不会把后端任务误派给设计或审计 Agent。
+父调度器会把这份精简执行证据（含 `fallback_errors`，不含大段模型输出）回写到对应 PLAN、当前任务或已完成 milestone，避免 scheduler 下一轮覆盖后失去追责链。
+
+## 原子任务状态
+
+```bash
+plow-whip --project MyProject task start \
+  --id T-12 --title "Implement API" --goal "Ship a working API" \
+  --owner codex_cli --next "Add endpoint" \
+  --acceptance "endpoint returns 200" "tests pass" \
+  --verify "python -m unittest" --rule-tags api database
+
+plow-whip --project MyProject task progress --output "Endpoint added" --next "Run tests"
+plow-whip --project MyProject task progress --output "Plan ready" \
+  --acceptance "endpoint returns 200" --verify "python -m unittest" --next "Implement"
+plow-whip --project MyProject task block --output "Cannot deploy" --blockers "missing credential"
+plow-whip --project MyProject task complete --output "Implementation finished"
+```
+
+这些命令原子更新 `AGENT_STATE.json`，避免状态、下一步和留言互相脱节。`task complete` 会自动执行任务的 `verify_commands`：全部通过才进入 `done`；失败则保持 `active`，把失败命令写成新的 `next_action`，由 scheduler 在租约到期后继续派发修复。启动 payload 中过长的 `last_output` 只返回末尾 1000 字符，完整结果仍保留在状态真源中。
+
+## 人只给目标
+
+```bash
+plow-whip --project MyProject goal start "交付可上线的登录功能"
+```
+
+系统通过 Registry 选择具备 `planner` 角色且 Driver 可执行的 Agent，让规划 Agent 只在第一次理解项目并提交 1–7 个粗粒度里程碑：
+
+```bash
+plow-whip --project MyProject goal plan \
+  --context-summary "复用后续接力所需的压缩项目上下文" \
+  --plan-json '[{"title":"实现并测试登录","role":"backend","capabilities":["api"],"acceptance":["测试通过"]},{"title":"最终集成验收","role":"reviewer","capabilities":["review"],"acceptance":["全量验收通过"],"final_acceptance":true}]'
+```
+
+Planner 通常只写角色和能力，由 Router 绑定实际 owner；只有用户明确指定某个 Agent 时才写 `owner`。每个里程碑内部自行完成读代码、实现、测试和文档，不拆成独立小任务。`task complete` 验收成功后自动切换到下一个里程碑；失败则停留修复。最后一个里程碑必须显式声明 `final_acceptance=true`，而且必须由未参与实现的可执行 Agent 独立验收，否则计划会被拒绝。
+
+启动包只返回当前任务、最多 1200 字符的目标上下文和完成进度，不返回完整队列或 Agent 清单。只有 PLAN 任务会收到去重后的角色/能力目录，因此 Registry 从 10 个扩到 100 个同类 Agent，也不会把 100 份配置烧进模型上下文。
+
+已有 active Goal 时再次 `goal start` 会进入 FIFO 队列，不会静默覆盖；当前 Goal 完成后自动激活下一个。只有明确使用 `--replace` 才会替换，并把旧 Goal 写入 `goal_history`：
+
+```bash
+plow-whip --project MyProject goal start "下一个交付目标"
+plow-whip --project MyProject goal start "紧急目标" --replace
+```
+
+`goal start` 同时为当前项目设置 `automation_enabled=true`。开启 `scheduler install --auto-continue` 后，定时器只派发明确 opt-in 的项目；其他普通 active、blocked 或 done 项目不会因为全局定时器而被驱动。
+
+## Handoff
+
+```bash
+plow-whip --project MyProject handoff \
+  --to reviewer --status in_progress --output "Implementation done" --next "Review changes"
+```
+
+handoff 同步更新 owner、任务状态、下一步、输出与阻塞，并检查会话和协作文件轮转。
+
+## 三层记忆
+
+- Hot：`AGENT_STATE.json`，每次启动加载。
+- Warm：定向消息和当前交接，按 Agent 筛选。
+- Cold：完整决策、历史消息和会话归档，只按需搜索。
+
+`DECISIONS.md` 不再计入 Warm。
+
+```bash
+plow-whip --project MyProject memory-budget --json
+plow-whip --project MyProject rotation-health --json
 plow-whip --project MyProject memory-rotate
 ```
 
-### 核心命令
+## Whip
 
-| 命令 | 功能 |
-|------|------|
-| `init` | 初始化项目（collab/ 目录 + 模板） |
-| `new` | 新建项目目录并一键初始化 plow-whip 规则 |
-| `status` | 查看项目状态 |
-| `doctor` | 检查 plow-whip 机制是否存在，`--repair` 可补齐缺失结构 |
-| `handoff` | 交接给下一个或指定 Agent（自动轮转会话） |
-| `context-pack` | 生成最小唤醒上下文包，优先给 Agent 读 |
-| `memory-budget` | 检查 Hot/Warm/Cold token 预算，不读正文 |
-| `whip` | 耕田之鞭 — 驱动摸鱼 Agent |
-| `brain` | DeepSeek 廉价大脑 — 简单任务直接完成 |
-| `memory-rotate` | 自动轮转所有记忆文件 |
-| `rotate` | 手动轮转会话 |
-| `permit` | 设置投递权限 |
-| `agent` | 查看或修改 Agent 角色和作业分配 |
-| `watch` | 监控项目状态变化 |
-| `bind-tab` | 绑定项目到 zellij tab |
-
-### 耕田之鞭 (whip)
+单次、安全、适合系统定时器的运行方式：
 
 ```bash
-plow-whip whip                    # 扫描报告：谁在摸鱼
-plow-whip whip --crack            # 抽鞭！实际投递任务
-plow-whip whip --auto-crack       # 持续自动挥舞
-plow-whip whip --daemon           # 持续监控模式
-plow-whip whip --auto-rotate      # 自动轮转超限会话
-plow-whip whip --brain            # 简单任务交给 DeepSeek
+plow-whip whip --once --json
+plow-whip whip --once --auto-rotate --crack --json
 ```
 
-`whip --crack` 只发送项目路径和关键协作文件路径；同一个任务未变化时会用 `last_wake_hash` 跳过重复投递。
+`--once` 使用跨平台单实例锁。自动续作每 5 分钟检查新进展；排队/失败 5 分钟后可重试，运行中的相同动作保留 30 分钟租约。同一动作最多自动尝试 3 次，防止无限消耗 token。
+
+旧 `--daemon` 与 `--auto-crack` 不再创建永久 Python 循环，只执行一次兼容扫描；周期运行统一交给系统 scheduler。
+
+探针和任务严格分层：默认 `--once` 只直读 `AGENT_STATE.json` 的状态、时间戳、任务 ID/状态，不加载 skills、协议正文、任务正文、消息或历史，也不轮转文件。只有发现 stale/状态不一致，并且显式启用 `--crack` 恢复时，才只为异常项目加载任务上下文。自动派发必须显式使用 `--crack`。
+
+Codex Desktop 定时唤醒只执行 `plow-whip whip --once --json`：`recovery_projects` 为空立即结束；非空才进入对应项目的恢复入口。探针输出用 `mode=probe`、`context_loaded=false`、`model_invoked=false` 明确声明边界。
+
+## 跨平台定时任务
 
 ```bash
-plow-whip --project MyProject handoff --to builder --output "done" --next "review this" --blockers "none"
+# 先预览，不写系统配置
+plow-whip scheduler install --interval 300 --dry-run
+
+# 安装用户级定时任务，默认不自动派发 Agent
+plow-whip scheduler install --interval 300
+
+# 明确允许无人值守续作（--auto-crack 是兼容别名）
+plow-whip scheduler install --interval 300 --auto-continue
+
+plow-whip scheduler status
+plow-whip scheduler run
+plow-whip scheduler start
+plow-whip scheduler stop
+plow-whip scheduler logs
+plow-whip scheduler doctor
+plow-whip scheduler repair
+plow-whip scheduler uninstall
 ```
 
-### DeepSeek 大脑 (brain)
+平台映射：
+
+| 系统 | 原生机制 | 配置位置 |
+|---|---|---|
+| macOS | launchd | `~/Library/LaunchAgents/com.plow-whip.scheduler.plist` |
+| Linux | systemd user timer | `~/.config/systemd/user/plow-whip.{service,timer}` |
+| Windows | Task Scheduler | 当前用户任务 `PlowWhipScheduler` |
+
+调度器优先固定已安装的 `plow-whip` 绝对入口，并写入稳定的工具 PATH，不依赖交互式 shell 环境。
+
+自动续作只扫描超时的 `active` 任务，`blocked` 和 `done` 不会派发。CLI/Brain 通道可真正无人值守执行；Desktop Agent 无可执行通道时只进入 inbox/系统通知，等待对应客户端接管。每次派发都有租约和 dispatch ID，不会无限高频重试。
+
+## 投递生命周期
+
+每次 dispatch 都带：
+
+```json
+{
+  "task_id": "T-12",
+  "dispatch_id": "DP-...",
+  "status": "queued | accepted | running | completed | failed"
+}
+```
+
+## CLI 认证与 Key 池
+
+`codex_cli` 和 `cursor_cli` 默认使用各自 Desktop/CLI 已登录账号。配置只保存环境变量名称，不保存真实 Key：
 
 ```bash
-plow-whip brain "写一个排序算法"   # 简单 → DeepSeek 1.7s 完成
-plow-whip brain "设计微服务架构"   # 复杂 → 建议上报主 Agent
+plow-whip cli-auth status
+plow-whip cli-auth mode codex_cli desktop
+plow-whip cli-auth mode cursor_cli desktop
+
+plow-whip cli-auth add codex_cli --name api-1 --env OPENAI_KEY_1 --model MODEL_ID
+plow-whip cli-auth add cursor_cli --name api-1 --env CURSOR_KEY_1 --model MODEL_ID
+plow-whip cli-auth select codex_cli --name api-1
+plow-whip cli-auth failover codex_cli on
+plow-whip cli-auth mode codex_cli pool
 ```
 
-复杂度自动分类：关键词匹配 + 长度权重 + 代码块检测
+Pool 模式按 active profile 优先，再按配置顺序尝试其他可用 profile。只对认证、额度、限流、连接超时和服务端错误执行有界切换；代码失败或任务未推进不会换 Key。模型随 profile 切换。空池不会回退到其他账号，而是明确失败。
 
-### 投递通道
+当前执行 Driver 包括 `codex_cli`、`cursor_cli`、`zellij` 和 `file`；通知和可选 Brain 属于投递兜底，不是 Agent 身份。逻辑 owner 优先使用自己的 Driver；遇到不可用、中断或网络故障时，同一轮由 Router 选择另一个同职责、同能力且 Driver 不同的 Agent 代跑，任务 owner、规则和验收命令不变。没有 Driver 实际执行时才记为 `queued` 并写入文件 inbox；这类投递只占用一个 scheduler 周期，不会被当成已完成。
 
-| 通道 | 说明 |
-|------|------|
-| `zellij` | 注入共享终端 |
-| `cursor_cli` | 唤醒 Cursor CLI |
-| `codex_cli` | 唤醒 Codex CLI |
-| `brain` | DeepSeek 处理简单任务 |
-| `file` | 写入任务收件箱 |
-| `notify` | macOS 通知 |
-
-### Agent 阵容
-
-Agent 名称、角色、作业分配都来自 `~/.plow-whip/config.json`：
+父调度器负责 CLI Driver 的 `running/completed/failed` lifecycle 回写，子 Agent 不重复写 inbox。Desktop/file 通道由外部接管时，仍可按 dispatch ID 更新单条任务，不需要清空整个 inbox：
 
 ```bash
-plow-whip configure --projects-dir ~/projects --agents planner builder reviewer
-plow-whip agent set planner --role "PM / Architect" --assignment "Break work into tasks"
-plow-whip agent set builder --role "Code Owner" --assignment "Implement scoped tasks"
-plow-whip agent list
+plow-whip inbox list --agent codex_cli
+plow-whip inbox update --agent codex_cli --dispatch-id DP-123 \
+  --status running
+plow-whip inbox update --agent codex_cli --dispatch-id DP-123 \
+  --status completed --output "tests passed"
 ```
 
-新项目初始化时会生成独立的 `collab/AGENTS.md`、`AGENT_STATE.json`、`AGENT_COMMS.md` 和约定文件。
+## CLI 会话生命周期
 
-### 自动轮转
+每个任务可以分别绑定一个 `cursor_cli` 会话和一个 `codex_cli` 会话；会话 ID 必须由 CLI 生成，plow-whip 只负责记录、恢复和归档：
 
-- **Agent 会话**: 100行/8KB → 归档 + 重建模板
-- **Collab 文件**: 80行/6KB → 保留最新30行
-- **触发点**: handoff、whip daemon、memory-rotate
+```json
+{
+  "cli_sessions": {
+    "cursor_cli": {"session_id": "...", "status": "active"},
+    "codex_cli": {"session_id": "...", "status": "active"}
+  }
+}
+```
 
-### 许可
+- Cursor CLI 首次运行使用 `--output-format stream-json`，从 `system/init.session_id` 取 ID；后续使用 `--resume=<session_id>`。
+- Codex CLI 首次运行使用 `exec --json` 捕获 session/thread ID；后续使用 `exec resume <session_id>`。
+- 同一任务、同一 CLI 如果返回不同 ID，立即失败，禁止产生第二个会话。
+- `task complete` 将该任务的全部 CLI 会话标记为 `archived`；下一任务从空 `cli_sessions` 开始。
+
+## 验证
+
+```bash
+python3 -m unittest discover -s tests
+python3 -m plow_whip.agent_flow --help
+```
+
+## License
 
 MIT
-
----
-
-<a id="english"></a>
-## English
-
-### Introduction
-
-plow-whip is a multi-agent collaboration framework that manages a **configurable agent lineup**, drives idle agents with the **whip**, and handles simple tasks with **DeepSeek brain**.
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│                    plow-whip                     │
-├──────────────┬──────────────┬───────────────────┤
-│   whip.py    │   brain.py   │    dispatch.py    │
-│  (The Plow Whip)  │ (DeepSeek)   │    (Dispatch)     │
-├──────────────┴──────────────┴───────────────────┤
-│               Configurable Agents                │
-│  planner / builder / reviewer / ...              │
-├─────────────────────────────────────────────────┤
-│            memory-rotate                         │
-│    Hot → Warm → Cold Memory Layers              │
-└─────────────────────────────────────────────────┘
-```
-
-### Quick Start
-
-```bash
-# Install
-pip install plow-whip
-
-# Initialize project
-plow-whip --project MyProject init
-
-# Create a new project with plow-whip rules
-plow-whip --project MyProject new --owner codex --first-action "clarify requirements"
-
-# Check status
-plow-whip --project MyProject status
-
-# First step when entering a project/session: verify or repair plow-whip
-plow-whip --project MyProject doctor --repair
-
-# Print a minimal wakeup context pack
-plow-whip --project MyProject context-pack --agent codex
-
-# Check Hot/Warm/Cold memory token budgets
-plow-whip --project MyProject memory-budget
-
-# Crack the plow-whip
-plow-whip whip --crack --brain
-
-# Daemon mode with auto-rotate
-plow-whip whip --auto-crack --auto-rotate
-
-# Use DeepSeek for simple tasks
-plow-whip brain "write a palindrome checker"
-```
-
-### Core Commands
-
-| Command | Description |
-|---------|-------------|
-| `init` | Initialize project |
-| `new` | Create a project and initialize plow-whip rules |
-| `status` | View project status |
-| `doctor` | Check plow-whip mechanism; `--repair` fills missing structure |
-| `handoff` | Handoff to next or specific agent (auto-rotates session) |
-| `context-pack` | Print minimal wakeup context for an agent |
-| `memory-budget` | Check Hot/Warm/Cold token budgets without reading content |
-| `whip` | The Plow Whip — drive idle agents |
-| `brain` | DeepSeek brain for simple tasks |
-| `memory-rotate` | Auto-rotate all memory files |
-| `rotate` | Manual session rotation |
-| `permit` | Set dispatch permissions |
-| `agent` | List or edit agent roles and assignments |
-
-### The Plow Whip
-
-```bash
-plow-whip whip                    # Scan: who is slacking?
-plow-whip whip --crack            # Crack! Dispatch tasks
-plow-whip whip --auto-crack       # Continuous auto-dispatch
-plow-whip whip --daemon           # Daemon monitoring mode
-plow-whip whip --auto-rotate      # Auto-rotate oversized sessions
-plow-whip whip --brain            # Simple tasks → DeepSeek
-```
-
-### DeepSeek Brain
-
-```bash
-plow-whip brain "write a sort function"    # Simple → DeepSeek 1.7s
-plow-whip brain "design microservices"     # Complex → escalate
-```
-
-Auto-classification: keyword matching + length weight + code block detection
-
-### Dispatch Channels
-
-| Channel | Description |
-|---------|-------------|
-| `zellij` | Shared terminal injection |
-| `cursor_cli` | Wake Cursor CLI |
-| `codex_cli` | Wake Codex CLI |
-| `brain` | DeepSeek processing |
-| `file` | Task inbox write |
-| `notify` | macOS notification |
-
-### Agent Lineup
-
-Agent names, roles, and assignments come from `~/.plow-whip/config.json`:
-
-```bash
-plow-whip configure --projects-dir ~/projects --agents planner builder reviewer
-plow-whip agent set planner --role "PM / Architect" --assignment "Break work into tasks"
-plow-whip agent set builder --role "Code Owner" --assignment "Implement scoped tasks"
-plow-whip agent list
-```
-
-Each initialized project gets its own `collab/AGENTS.md`, `AGENT_STATE.json`, `AGENT_COMMS.md`, and conventions.
-
-### Auto-Rotation
-
-- **Agent sessions**: 100 lines/8KB → archive + rebuild
-- **Collab files**: 80 lines/6KB → keep latest 30 lines
-- **Triggers**: handoff, whip daemon, memory-rotate
-
-### License
-
-MIT
-
-### Qoder CN IDE Session Manager
-
-针对 [Qoder CN](https://qoder.cn) IDE 的会话历史管理模块。
-
-**背景**：Qoder CN 采用 JSONL 格式存储会话历史，随着对话增长会导致上下文膨胀。
-本模块提供自动轮转、安全切割、索引检索和回退机制。
-
-```bash
-# 轮转超阈值会话（配合 launchd 定时任务）
-python -m plow_whip.qoder_session rotate
-
-# 列出所有归档
-python -m plow_whip.qoder_session archives
-
-# 回退最近一次归档
-python -m plow_whip.qoder_session rollback --task task-037
-
-# 搜索历史会话
-python -m plow_whip.qoder_session search "Sprint"
-```
-
-**Python API**：
-```python
-from plow_whip.qoder_session import QoderSessionManager
-
-mgr = QoderSessionManager()
-mgr.run_rotation()                    # 执行轮转
-results = mgr.search_sessions("API")  # 搜索历史
-mgr.rollback_latest("task-037")       # 回退
-```
-
-**自动轮转配置**（launchd）：
-- 脚本位置：`~/.plow-whip/qoder_session_manager.py`
-- 配置文件：`~/.plow-whip/qoder_sessions.yaml`
-- 执行频率：每 30 分钟
-
-详见 [docs/qoder-cn-api-suggestion.md](docs/qoder-cn-api-suggestion.md) 了解我们对 Qoder CN 官方提供会话 API 的建议。

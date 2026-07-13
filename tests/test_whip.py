@@ -18,6 +18,8 @@ from plow_whip.whip import (
     _is_stale,
     _parse_updated_at,
     _staleness_info,
+    _wake_hash,
+    _wake_lease_active,
     cmd_whip,
     filter_active,
     filter_by_agent,
@@ -125,6 +127,30 @@ class TestStalenessInfo(WhipTestBase):
         self.assertIn("天前", info)
 
 
+class TestWakeLease(unittest.TestCase):
+    def test_queued_wake_retries_after_one_scheduler_cycle(self):
+        wake_hash = "same-action"
+        state = {
+            "last_wake_hash": wake_hash,
+            "last_wake_status": "queued",
+            "last_woken_at": (
+                datetime.now().astimezone() - timedelta(seconds=61)
+            ).isoformat(),
+        }
+        self.assertFalse(_wake_lease_active(state, wake_hash))
+
+    def test_accepted_wake_keeps_normal_duplicate_lease(self):
+        wake_hash = "same-action"
+        state = {
+            "last_wake_hash": wake_hash,
+            "last_wake_status": "accepted",
+            "last_woken_at": (
+                datetime.now().astimezone() - timedelta(minutes=5)
+            ).isoformat(),
+        }
+        self.assertTrue(_wake_lease_active(state, wake_hash))
+
+
 class TestScanAllProjects(WhipTestBase):
     def test_empty_projects(self):
         results = scan_all_projects()
@@ -152,7 +178,7 @@ class TestScanAllProjects(WhipTestBase):
         af.cmd_init("DoneProject")
         # 手动标记为 done
         state = af.load_state("DoneProject")
-        state["status"] = "done"
+        state["task"]["status"] = "done"
         af.save_state("DoneProject", state)
         results = scan_all_projects()
         self.assertEqual(len(results), 1)
@@ -181,12 +207,20 @@ class TestFilters(WhipTestBase):
         af.cmd_init("Active")
         af.cmd_init("Done")
         state = af.load_state("Done")
-        state["status"] = "done"
+        state["task"]["status"] = "done"
         af.save_state("Done", state)
         results = scan_all_projects()
         active = filter_active(results)
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]["project"], "Active")
+
+    def test_filter_active_excludes_blocked_projects(self):
+        results = [
+            {"project": "Active", "status": "in_progress"},
+            {"project": "Blocked", "status": "blocked"},
+            {"project": "Done", "status": "done"},
+        ]
+        self.assertEqual([item["project"] for item in filter_active(results)], ["Active"])
 
 
 class TestWhipPrompt(WhipTestBase):
@@ -217,11 +251,8 @@ class TestWhipPrompt(WhipTestBase):
             "task_context": {},
         }
         prompt = generate_whip_prompt(result)
-        self.assertIn("collab/CONVENTIONS.md", prompt)
-        self.assertIn("collab/AGENT_STATE.json", prompt)
-        self.assertIn("collab/AGENT_COMMS.md", prompt)
-        self.assertIn("collab/memory/NEXT_ACTION.md", prompt)
-        self.assertNotIn("Recent Messages", prompt)
+        self.assertIn("start --agent codex --json", prompt)
+        self.assertNotIn("collab/AGENT_COMMS.md", prompt)
 
     def test_generate_notification_stale(self):
         result = {
@@ -247,6 +278,14 @@ class TestWhipPrompt(WhipTestBase):
 
 
 class TestCmdWhip(WhipTestBase):
+    @patch("plow_whip.whip.run_once")
+    def test_legacy_daemon_flags_run_once(self, mock_once):
+        mock_once.return_value = {"status": "ok", "projects": []}
+        cmd_whip(FakeArgs(agent=None, stale_minutes=60, json=False, daemon=True, interval=300,
+                          crack=False, auto_crack=False, channel=None, force=False,
+                          auto_rotate=False, brain=False, once=False))
+        mock_once.assert_called_once()
+
     def test_whip_no_projects(self):
         args = FakeArgs(agent=None, stale_minutes=60, json=False, daemon=False, interval=300)
         cmd_whip(args)  # Should not raise
@@ -270,7 +309,7 @@ class TestCmdWhip(WhipTestBase):
     def test_whip_all_done(self):
         af.cmd_init("Done1")
         state = af.load_state("Done1")
-        state["status"] = "done"
+        state["task"]["status"] = "done"
         af.save_state("Done1", state)
         args = FakeArgs(agent=None, stale_minutes=60, json=False, daemon=False, interval=300)
         cmd_whip(args)  # Should print "all done"
@@ -295,6 +334,51 @@ class TestCmdWhip(WhipTestBase):
         state = af.load_state("TestProject")
         self.assertEqual(state["wake_count"], 1)
         self.assertTrue(state["last_wake_hash"])
+
+        state["last_woken_at"] = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+        af.write_state("TestProject", state, touch=False)
+        cmd_whip(args)
+        self.assertEqual(mock_dispatch.call_count, 2)
+        self.assertEqual(af.load_state("TestProject")["wake_count"], 2)
+
+        state = af.load_state("TestProject")
+        state["wake_count"] = 3
+        state["last_woken_at"] = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+        af.write_state("TestProject", state, touch=False)
+        cmd_whip(args)
+        self.assertEqual(mock_dispatch.call_count, 2)
+
+    @patch("plow_whip.whip.dispatch")
+    def test_queued_cli_wake_gets_additional_failover_attempts(self, mock_dispatch):
+        mock_dispatch.return_value = {
+            "success": True,
+            "channel": "codex_cli",
+            "detail": "recovered",
+            "status": "completed",
+        }
+        af.cmd_init("TestProject")
+        state = af.load_state("TestProject")
+        state["updated_at"] = (
+            datetime.now().astimezone() - timedelta(hours=2)
+        ).isoformat()
+        wake_hash = _wake_hash(scan_all_projects()[0])
+        state["last_wake_hash"] = wake_hash
+        state["last_wake_status"] = "queued"
+        state["last_woken_at"] = (
+            datetime.now().astimezone() - timedelta(minutes=2)
+        ).isoformat()
+        state["wake_count"] = 3
+        af.write_state("TestProject", state, touch=False)
+
+        args = FakeArgs(
+            agent=None, stale_minutes=60, json=False, daemon=False, interval=300,
+            crack=True, auto_crack=False, channel=None, force=False,
+            auto_rotate=False, brain=False,
+        )
+        cmd_whip(args)
+
+        mock_dispatch.assert_called_once()
+        self.assertEqual(af.load_state("TestProject")["wake_count"], 4)
 
 
 class FakeArgs:

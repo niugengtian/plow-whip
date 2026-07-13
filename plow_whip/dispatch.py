@@ -1,36 +1,44 @@
 #!/usr/bin/env python3
 """
-dispatch.py — 鞭子本体：将任务投递给指定 AI agent
-
-三种投递方式（按优先级）：
-  1. zellij  — 直接往共享终端注入命令（实时，agent 立即看到）
-  2. file    — 写入任务收件箱文件（agent 启动时读取）
-  3. notify  — macOS 通知（最后手段，提醒人来转达）
+dispatch.py — 将逻辑 Agent 解析成可执行 Driver，并按同职责候选故障接力
 
 用法:
     from plow_whip.dispatch import dispatch
     dispatch("codex", project="MyProject", prompt="实现登录功能")
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
+import shlex
+import signal
 import subprocess
 import sys
+import threading
+import uuid
 from datetime import datetime
 
 from . import agent_flow as af
+from . import routing
 from .brain import Brain, classify_complexity
+from .io_utils import atomic_write_json, file_lock
 
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
 
 ZELLIJ_SESSION = "shared"
-INBOX_DIR = os.path.join(os.path.expanduser("~"), ".plow-whip", "inbox")
+INBOX_DIR = os.path.join(os.environ.get("PLOW_WHIP_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".plow-whip")), "inbox")
 
 
 def _ensure_inbox():
     os.makedirs(INBOX_DIR, exist_ok=True)
+
+
+def _inbox_file(agent: str) -> str:
+    af.validate_identifier(agent, "agent")
+    return os.path.join(INBOX_DIR, f"{agent}.json")
 
 # ── 权限控制 ──────────────────────────────────────────────────────────────────
 
@@ -66,8 +74,7 @@ def _save_permissions():
     perm_dir = os.path.join(os.path.expanduser("~"), ".plow-whip")
     os.makedirs(perm_dir, exist_ok=True)
     perm_file = os.path.join(perm_dir, "permissions.json")
-    with open(perm_file, "w", encoding="utf-8") as f:
-        json.dump(_permission_state, f, ensure_ascii=False, indent=2)
+    atomic_write_json(perm_file, _permission_state)
 
 def set_permission(mode: str, count: int = 1):
     """
@@ -135,52 +142,55 @@ def _zellij_available() -> bool:
         return False
 
 
+def _driver_available(driver: str) -> bool:
+    """Check one execution driver without invoking a model."""
+    if driver == "codex_cli":
+        return bool(shutil.which("codex") or shutil.which("npx"))
+    if driver == "cursor_cli":
+        return bool(shutil.which("cursor-agent"))
+    if driver == "zellij":
+        return _zellij_available()
+    if driver == "notify":
+        return sys.platform == "darwin"
+    return driver in ("file", "brain")
+
+
 def _agent_cli_available(agent: str) -> bool:
-    """检查 agent 的 CLI 是否可用。"""
-    cli_map = {
-        "codex": "codex",
-        "codex_cli": "codex",
-        "cursor_cli": "cursor-agent",
-    }
-    cmd = cli_map.get(agent)
-    if not cmd:
-        return False
-    if agent == "cursor_cli" and not shutil.which(cmd):
-        cmd = "cursor"
-    try:
-        subprocess.run(
-            ["which", cmd],
-            capture_output=True, timeout=3,
+    """Compatibility wrapper for callers/tests using legacy agent names."""
+    return _driver_available({"codex": "codex_cli"}.get(agent, agent))
+
+
+def _execution_routes(agent: str, project: str | None = None) -> list[dict]:
+    if project and os.path.exists(af.protocol_file(project)):
+        task = af.load_state(project).get("task", {})
+        return routing.execution_routes(
+            af.load_protocol(project), agent, _driver_available,
+            role=task.get("required_role"), capabilities=task.get("required_capabilities"),
         )
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    legacy = {
+        "cursor_cli": ["cursor_cli", "codex_cli"],
+        "codex": ["codex_cli", "cursor_cli"],
+        "codex_cli": ["codex_cli", "cursor_cli"],
+        "cursor": ["zellij"],
+    }
+    return [
+        {"agent": agent, "driver": driver}
+        for driver in legacy.get(agent, []) if _driver_available(driver)
+    ]
 
 
-def available_channels(agent: str) -> list:
+def available_channels(agent: str, project: str | None = None) -> list:
     """返回指定 agent 当前可用的投递通道列表（按优先级）。"""
-    channels = []
-    
-    # CLI 通道（最优，真正自动唤醒）
-    if agent == "cursor_cli" and _agent_cli_available("cursor_cli"):
-        channels.append("cursor_cli")
-    if agent in ("codex", "codex_cli") and _agent_cli_available("codex"):
-        channels.append("codex_cli")
-    
-    # zellij 通道（Desktop agent 专属）
-    if agent == "cursor" and _zellij_available():
-        channels.append("zellij")
-    
-    # 通用 CLI 通道
-    if _agent_cli_available(agent):
-        channels.append("cli")
+    channels = [item["driver"] for item in _execution_routes(agent, project)]
     
     # Brain 通道（简单任务直接完成）
     channels.append("brain")
 
     # 兜底通道
-    channels.append("file")
-    channels.append("notify")
+    if "file" not in channels:
+        channels.append("file")
+    if sys.platform == "darwin":
+        channels.append("notify")
     return channels
 
 
@@ -192,9 +202,9 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
     如果指定 target_tab，先切换到对应 tab 再注入。
     """
     # 构造注入的命令
-    header = f"echo '=== 耕田之鞭 === 项目: {project} ==='"
-    status_cmd = f"python3 -m plow_whip.agent_flow --project {project} status"
-    prompt_echo = f"echo '{prompt}'"
+    header = f"printf '%s\\n' {shlex.quote(f'=== 耕田之鞭 === 项目: {project} ===')}"
+    status_cmd = f"python3 -m plow_whip.agent_flow --project {shlex.quote(project)} status"
+    prompt_echo = f"printf '%s\\n' {shlex.quote(prompt)}"
     full_command = f"{header} && {status_cmd} && {prompt_echo}"
 
     try:
@@ -219,7 +229,170 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
         return {"success": False, "channel": "zellij", "detail": "zellij 未安装"}
 
 
-def _dispatch_cursor_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 300) -> dict:
+def _task_marker(state: dict) -> str:
+    task = dict(state.get("task", {}))
+    task.pop("cli_sessions", None)
+    return json.dumps(task, ensure_ascii=False, sort_keys=True)
+
+
+def _existing_cli_session(project: str, agent: str) -> dict | None:
+    return af.load_state(project).get("task", {}).get("cli_sessions", {}).get(agent)
+
+
+def _record_cli_session(project: str, agent: str, session_id: str, route: dict | None = None) -> dict:
+    """Persist one CLI-generated session ID per task and CLI."""
+    for _ in range(3):
+        state = af.load_state(project)
+        task = state.setdefault("task", {})
+        sessions = task.setdefault("cli_sessions", {})
+        existing = sessions.get(agent)
+        if existing:
+            if existing.get("session_id") != session_id:
+                raise RuntimeError(
+                    f"task {task.get('id')} already owns {agent} session {existing.get('session_id')}"
+                )
+            return existing
+        sessions[agent] = {
+            "session_id": session_id,
+            "status": "active",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "auth_profile": (route or {}).get("name", "desktop"),
+            "model": (route or {}).get("model"),
+        }
+        try:
+            af.save_state(project, state)
+            return sessions[agent]
+        except RuntimeError:
+            continue
+    raise RuntimeError(f"could not persist {agent} session after concurrent state updates")
+
+
+def _event_session_id(event: dict) -> str | None:
+    return (
+        event.get("session_id")
+        or event.get("thread_id")
+        or (event.get("thread") or {}).get("id")
+    )
+
+
+def _terminate_process_group(process) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (AttributeError, ProcessLookupError, PermissionError):
+        try:
+            process.terminate()
+        except (AttributeError, ProcessLookupError):
+            pass
+
+
+def _run_streaming_cli(cmd: list[str], cwd: str, timeout: int, on_event, on_start=None, env=None) -> dict:
+    """Consume JSONL without creating another Agent or probing the model."""
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+        env=env,
+    )
+    if on_start:
+        on_start(process.pid)
+    timed_out = threading.Event()
+
+    def stop():
+        timed_out.set()
+        _terminate_process_group(process)
+        def force_kill():
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except (AttributeError, ProcessLookupError):
+                    pass
+        killer = threading.Timer(5, force_kill)
+        killer.daemon = True
+        killer.start()
+
+    timer = threading.Timer(timeout, stop)
+    timer.daemon = True
+    timer.start()
+    lines = []
+    try:
+        try:
+            for raw in process.stdout or ():
+                lines.append(raw)
+                try:
+                    on_event(json.loads(raw))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            process.wait()
+        except Exception:
+            _terminate_process_group(process)
+            process.wait()
+            raise
+    finally:
+        timer.cancel()
+    return {
+        "pid": process.pid,
+        "returncode": process.returncode,
+        "timed_out": timed_out.is_set(),
+        "output": "".join(lines),
+    }
+
+
+def _retryable_cli_failure(result: dict) -> bool:
+    if result.get("timed_out"):
+        return True
+    output = result.get("output", "").lower()
+    markers = (
+        "socket hang up", "timed out", "timeout", "rate limit", "rate_limit",
+        "quota", "insufficient_quota", "unauthorized", "invalid api key",
+        "invalid_api_key", "authentication", "401", "403", "429",
+        "500", "502", "503", "504", "connection reset",
+    )
+    return result.get("returncode") != 0 and any(marker in output for marker in markers)
+
+
+def _candidate_env(agent: str, candidate: dict) -> dict:
+    env = os.environ.copy()
+    key_name = "CODEX_API_KEY" if agent == "codex_cli" else "CURSOR_API_KEY"
+    if candidate.get("secret"):
+        env[key_name] = candidate["secret"]
+    else:
+        env.pop(key_name, None)
+    return env
+
+
+def _run_cli_candidates(agent: str, build_command, cwd: str, timeout: int, on_event, on_start, active: dict) -> dict:
+    from .cli_auth import candidates
+
+    routes = candidates(agent)
+    if not routes:
+        return {"config_error": "API key pool has no available profiles", "attempts": []}
+    attempts = []
+    for index, route in enumerate(routes):
+        active.clear()
+        active.update(route)
+        result = _run_streaming_cli(
+            build_command(route), cwd, timeout, on_event, on_start,
+            env=_candidate_env(agent, route),
+        )
+        attempts.append({"profile": route["name"], "model": route.get("model"), "returncode": result["returncode"]})
+        result.update({"auth_profile": route["name"], "model": route.get("model"), "attempts": attempts})
+        if result["returncode"] == 0 or index == len(routes) - 1 or not _retryable_cli_failure(result):
+            return result
+    return result
+
+
+def _dispatch_cursor_cli(
+    prompt: str,
+    project: str,
+    max_turns: int = 20,
+    timeout: int = 300,
+    agent: str | None = None,
+    dispatch_id: str | None = None,
+) -> dict:
     """通过 Cursor CLI 唤醒 Cursor 执行任务。"""
     project_path = af.project_dir(project)
     if not os.path.isdir(project_path):
@@ -231,43 +404,88 @@ def _dispatch_cursor_cli(prompt: str, project: str, max_turns: int = 20, timeout
 {prompt}
 
 完成后:
-1. 更新 AGENT_STATE.json (handoff)
-2. 写进度到 AGENT_COMMS.md
-3. 清空 ~/.plow-whip/inbox/cursor_cli.json 中对应任务"""
+1. 使用 plow-whip task progress 或 handoff 更新状态
+2. 当前里程碑完成时使用 plow-whip task complete；投递 lifecycle 由父调度器回写"""
 
-    if shutil.which("cursor-agent"):
-        cmd = ["cursor-agent", "--print", "--force", "--trust", "--workspace", project_path, full_prompt]
-    elif shutil.which("cursor"):
-        cmd = ["cursor", "-p", full_prompt]
-    else:
-        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 或 cursor 未安装"}
+    cursor_bin = shutil.which("cursor-agent")
+    if not cursor_bin:
+        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 未安装"}
+    session = _existing_cli_session(project, "cursor_cli")
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=project_path,
-            capture_output=True, text=True,
-            timeout=timeout,
+        initial_marker = _task_marker(af.load_state(project))
+        captured = {"session_id": session.get("session_id") if session else None}
+        active_route = {}
+
+        def build_command(route):
+            cmd = [cursor_bin, "--print", "--force", "--output-format", "stream-json"]
+            if route.get("model"):
+                cmd.extend(["--model", route["model"]])
+            if captured["session_id"]:
+                cmd.append(f"--resume={captured['session_id']}")
+            cmd.append(full_prompt)
+            return cmd
+
+        def on_event(event):
+            session_id = _event_session_id(event)
+            if not session_id:
+                return
+            if captured["session_id"] and captured["session_id"] != session_id:
+                raise RuntimeError(f"cursor_cli resumed as unexpected session {session_id}")
+            if not captured["session_id"]:
+                _record_cli_session(project, "cursor_cli", session_id, active_route)
+                captured["session_id"] = session_id
+
+        on_start = (
+            lambda pid: update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
+            if agent and dispatch_id else None
         )
-        if result.returncode == 0:
+        result = _run_cli_candidates(
+            "cursor_cli", build_command, project_path, timeout, on_event, on_start, active_route,
+        )
+        if result.get("config_error"):
+            return {"success": False, "channel": "cursor_cli", "detail": result["config_error"]}
+        if result["timed_out"]:
+            return {"success": False, "channel": "cursor_cli", "detail": "cursor 超时并已终止", "pid": result["pid"], "attempts": result["attempts"]}
+        if result["returncode"] == 0 and not captured["session_id"]:
+            return {"success": False, "channel": "cursor_cli", "detail": "cursor 成功退出但未返回 session_id", "pid": result["pid"]}
+        if result["returncode"] == 0:
+            if _task_marker(af.load_state(project)) == initial_marker:
+                return {"success": False, "channel": "cursor_cli", "detail": "cursor 正常退出但任务状态未推进", "pid": result["pid"], "session_id": captured["session_id"]}
             return {
                 "success": True,
                 "channel": "cursor_cli",
                 "detail": f"Cursor CLI 已在 {project_path} 执行任务",
-                "output": result.stdout[:500] if result.stdout else "",
+                "output": result["output"][-500:],
+                "pid": result["pid"],
+                "session_id": captured["session_id"],
+                "auth_profile": result["auth_profile"],
+                "model": result.get("model"),
+                "attempts": result["attempts"],
             }
         return {
             "success": False,
             "channel": "cursor_cli",
-            "detail": f"cursor 返回 {result.returncode}: {result.stderr[:200]}",
+            "detail": f"cursor 返回 {result['returncode']}: {result['output'][-200:]}",
+            "pid": result["pid"],
+            "auth_profile": result["auth_profile"],
+            "model": result.get("model"),
+            "attempts": result["attempts"],
         }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "channel": "cursor_cli", "detail": "cursor 超时"}
-    except FileNotFoundError:
-        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 或 cursor 未安装"}
+    except (FileNotFoundError, RuntimeError) as exc:
+        if isinstance(exc, RuntimeError):
+            return {"success": False, "channel": "cursor_cli", "detail": str(exc)}
+        return {"success": False, "channel": "cursor_cli", "detail": "cursor-agent 未安装"}
 
 
-def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout: int = 1800) -> dict:
+def _dispatch_codex_cli(
+    prompt: str,
+    project: str,
+    max_turns: int = 20,
+    timeout: int = 1800,
+    agent: str | None = None,
+    dispatch_id: str | None = None,
+) -> dict:
     """
     通过 codex CLI Print 模式直接唤醒 Codex 执行任务。
     timeout 默认 1800 秒（30 分钟），Sprint 级任务需要足够时间。
@@ -285,42 +503,102 @@ def _dispatch_codex_cli(prompt: str, project: str, max_turns: int = 20, timeout:
 {prompt}
 
 完成后:
-1. 更新 AGENT_STATE.json (handoff)
-2. 写进度到 AGENT_COMMS.md
-3. 清空 ~/.plow-whip/inbox/codex.json 中对应任务"""
+1. 使用 plow-whip task progress 或 handoff 更新状态
+2. 当前里程碑完成时使用 plow-whip task complete；投递 lifecycle 由父调度器回写"""
     
-    cmd = [
-        "npx", "@openai/codex",
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        command = [codex_bin]
+    elif shutil.which("npx"):
+        command = [shutil.which("npx"), "-y", "@openai/codex"]
+    else:
+        return {"success": False, "channel": "codex_cli", "detail": "codex 或 npx 未安装"}
+    prefix = [
         "-a", "never",       # 不自动审批
         "-s", "workspace-write",  # 沙箱模式
         "-C", project_path,  # 工作目录
-        "exec", "--ephemeral",  # 一次性执行
-        full_prompt,
+        "exec",
     ]
-    
+    session = _existing_cli_session(project, "codex_cli")
+    initial_marker = _task_marker(af.load_state(project))
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=timeout,  # 默认 5 分钟
+        captured = {"session_id": session.get("session_id") if session else None}
+        active_route = {}
+
+        def build_command(route):
+            cmd = list(command)
+            options = list(prefix[:-1])
+            if route.get("model"):
+                options.extend(["--model", route["model"]])
+            options.extend(["exec", "--skip-git-repo-check"])
+            if captured["session_id"]:
+                cmd.extend(options + ["resume", "--json", captured["session_id"], full_prompt])
+            else:
+                cmd.extend(options + ["--json", full_prompt])
+            return cmd
+
+        def on_event(event):
+            session_id = _event_session_id(event)
+            if not session_id:
+                return
+            if captured["session_id"] and captured["session_id"] != session_id:
+                raise RuntimeError(f"codex_cli resumed as unexpected session {session_id}")
+            if not captured["session_id"]:
+                _record_cli_session(project, "codex_cli", session_id, active_route)
+                captured["session_id"] = session_id
+
+        on_start = (
+            lambda pid: update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
+            if agent and dispatch_id else None
         )
-        if result.returncode == 0:
+        result = _run_cli_candidates(
+            "codex_cli", build_command, project_path, timeout, on_event, on_start, active_route,
+        )
+        if result.get("config_error"):
+            return {"success": False, "channel": "codex_cli", "detail": result["config_error"]}
+        if result["timed_out"]:
+            return {
+                "success": False,
+                "channel": "codex_cli",
+                "detail": f"codex 超时并已终止 pid={result['pid']}",
+                "pid": result["pid"],
+                "attempts": result["attempts"],
+            }
+        if result["returncode"] == 0 and not captured["session_id"]:
+            return {"success": False, "channel": "codex_cli", "detail": "codex 成功退出但未返回 session_id", "pid": result["pid"]}
+        if result["returncode"] == 0:
+            if _task_marker(af.load_state(project)) == initial_marker:
+                return {
+                    "success": False,
+                    "channel": "codex_cli",
+                    "detail": f"codex pid={result['pid']} 正常退出但任务状态未推进",
+                    "pid": result["pid"],
+                    "session_id": captured["session_id"],
+                }
             return {
                 "success": True,
                 "channel": "codex_cli",
                 "detail": f"Codex CLI 已在 {project_path} 执行任务",
-                "output": result.stdout[:500] if result.stdout else "",
+                "output": result["output"][-500:],
+                "pid": result["pid"],
+                "session_id": captured["session_id"],
+                "auth_profile": result["auth_profile"],
+                "model": result.get("model"),
+                "attempts": result["attempts"],
             }
         return {
             "success": False,
             "channel": "codex_cli",
-            "detail": f"codex 返回 {result.returncode}: {result.stderr[:200]}",
+            "detail": f"codex pid={result['pid']} 返回 {result['returncode']}: {result['output'][-200:]}",
+            "pid": result["pid"],
+            "auth_profile": result["auth_profile"],
+            "model": result.get("model"),
+            "attempts": result["attempts"],
         }
-    except subprocess.TimeoutExpired:
-        timeout_min = timeout // 60
-        return {"success": False, "channel": "codex_cli", "detail": f"codex 超时 ({timeout_min}分钟)"}
-    except FileNotFoundError:
-        return {"success": False, "channel": "codex_cli", "detail": "npx 或 @openai/codex 未安装"}
+    except (FileNotFoundError, RuntimeError) as exc:
+        if isinstance(exc, RuntimeError):
+            return {"success": False, "channel": "codex_cli", "detail": str(exc)}
+        return {"success": False, "channel": "codex_cli", "detail": "codex 或 npx 未安装"}
 
 
 
@@ -366,37 +644,55 @@ def _dispatch_brain(agent: str, prompt: str, project: str) -> dict:
     else:
         return {"success": False, "channel": "brain", "detail": result["reason"]}
 
-def _dispatch_file(agent: str, prompt: str, project: str) -> dict:
+def _dispatch_file(agent: str, prompt: str, project: str, dispatch_id: str = None, task_id: str = None) -> dict:
     """
     写入任务收件箱文件。
     agent 启动时会读取 ~/.plow-whip/inbox/<agent>.json
     """
     _ensure_inbox()
-    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
+    inbox_file = _inbox_file(agent)
 
-    # 读取现有任务（如有）
-    tasks = []
-    if os.path.exists(inbox_file):
-        try:
-            with open(inbox_file, encoding="utf-8") as f:
-                tasks = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            tasks = []
-
-    # 追加新任务
-    tasks.append({
+    dispatch_id = dispatch_id or f"DP-{uuid.uuid4().hex[:12]}"
+    task_id = task_id or (af.load_state(project).get("task", {}).get("id", "T-001") if os.path.exists(af.state_file(project)) else "T-001")
+    record = {
+        "dispatch_id": dispatch_id,
+        "task_id": task_id,
         "project": project,
         "project_path": af.project_dir(project),
         "prompt": prompt,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "status": "pending",
-    })
+        "status": "queued",
+    }
+    with file_lock(inbox_file + ".lock"):
+        tasks = read_inbox(agent)
+        for index, task in enumerate(tasks):
+            if task.get("dispatch_id") == dispatch_id:
+                tasks[index] = {**task, **record}
+                break
+        else:
+            tasks.append(record)
+        atomic_write_json(inbox_file, tasks)
 
-    with open(inbox_file, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    return {"success": True, "channel": "file", "detail": f"任务已写入 {inbox_file}", "dispatch_id": dispatch_id, "task_id": task_id, "status": "queued"}
 
-    return {"success": True, "channel": "file", "detail": f"任务已写入 {inbox_file}"}
+
+def update_inbox_task(agent: str, dispatch_id: str, status: str, output: str = "") -> dict:
+    allowed = {"queued", "accepted", "running", "completed", "failed"}
+    if status not in allowed:
+        raise ValueError(f"invalid dispatch status: {status}")
+    _ensure_inbox()
+    inbox_file = _inbox_file(agent)
+    with file_lock(inbox_file + ".lock"):
+        tasks = read_inbox(agent)
+        for task in tasks:
+            if task.get("dispatch_id") == dispatch_id:
+                task["status"] = status
+                task[f"{status}_at"] = datetime.now().isoformat(timespec="seconds")
+                if output:
+                    task["output"] = output
+                atomic_write_json(inbox_file, tasks)
+                return task
+    raise KeyError(f"dispatch not found: {dispatch_id}")
 
 
 def _dispatch_notify(agent: str, prompt: str, project: str) -> dict:
@@ -404,6 +700,30 @@ def _dispatch_notify(agent: str, prompt: str, project: str) -> dict:
     message = f"[{project}] 轮到 {agent} — 请查看任务"
     af.notify(message, ring=True)
     return {"success": True, "channel": "notify", "detail": "macOS 通知已发送"}
+
+
+def _record_execution(project: str, task_id: str | None, result: dict) -> None:
+    """Persist a compact audit trail without copying model output into Hot context."""
+    if not task_id or not os.path.exists(af.state_file(project)):
+        return
+    state = af.load_state(project)
+    execution = {
+        key: result[key]
+        for key in ("dispatch_id", "logical_owner", "executor", "driver", "status", "session_id", "fallback_errors")
+        if result.get(key) is not None
+    }
+    goal = state.get("goal") or {}
+    target = next((item for item in goal.get("completed", []) if item.get("id") == task_id), None)
+    if target is not None:
+        target["execution"] = execution
+    elif task_id.endswith("-PLAN") and goal.get("id") and task_id == f"{goal['id']}-PLAN":
+        goal["planning_execution"] = execution
+        state["goal"] = goal
+    elif state.get("task", {}).get("id") == task_id:
+        state["task"]["execution"] = execution
+    else:
+        return
+    af.save_state(project, state)
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
@@ -422,46 +742,82 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
       {"success": bool, "channel": str, "detail": str}
     """
     use_brain = kwargs.pop("use_brain", False)
+    dispatch_id = kwargs.pop("dispatch_id", None) or f"DP-{uuid.uuid4().hex[:12]}"
+    task_id = kwargs.pop("task_id", None)
+    if task_id is None and os.path.exists(af.state_file(project)):
+        task_id = af.load_state(project).get("task", {}).get("id", "T-001")
+    ledger = _dispatch_file(agent, prompt, project, dispatch_id=dispatch_id, task_id=task_id)
 
     if force_channel:
         channels = [force_channel]
     else:
-        channels = available_channels(agent)
+        routes = _execution_routes(agent, project)
+        channels = available_channels(agent, project)
         # Brain 通道只在显式启用时使用
         if not use_brain:
             channels = [ch for ch in channels if ch != "brain"]
 
+    failures = []
     for ch in channels:
+        route = next((item for item in routes if item["driver"] == ch), {"agent": agent, "driver": ch}) if not force_channel else {"agent": agent, "driver": ch}
         if ch == "brain":
             result = _dispatch_brain(agent, prompt, project)
         elif ch == "cursor_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 300)
-            result = _dispatch_cursor_cli(prompt, project, max_turns, timeout)
+            result = _dispatch_cursor_cli(prompt, project, max_turns, timeout, agent, dispatch_id)
         elif ch == "codex_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 1800)
-            result = _dispatch_codex_cli(prompt, project, max_turns, timeout)
+            result = _dispatch_codex_cli(prompt, project, max_turns, timeout, agent, dispatch_id)
         elif ch == "zellij":
             target_tab = kwargs.get("target_tab")
             result = _dispatch_zellij(prompt, project, target_tab)
         elif ch == "file":
-            result = _dispatch_file(agent, prompt, project)
+            result = ledger
         elif ch == "notify":
             result = _dispatch_notify(agent, prompt, project)
         else:
             continue
 
         if result["success"]:
+            lifecycle = "completed" if ch in ("brain", "cursor_cli", "codex_cli", "cli") else "queued" if ch == "file" else "accepted"
+            if lifecycle != "queued" or failures:
+                try:
+                    output = result.get("output", "")
+                    if failures:
+                        output = json.dumps({"fallback_errors": failures}, ensure_ascii=False)
+                    update_inbox_task(agent, dispatch_id, lifecycle, output)
+                except KeyError:
+                    pass
+            result.update({"dispatch_id": dispatch_id, "task_id": task_id, "status": lifecycle})
+            result.update({"logical_owner": agent, "executor": route["agent"], "driver": ch})
+            if failures:
+                result["fallback_errors"] = failures
+            _record_execution(project, task_id, result)
             return result
+        failures.append({"channel": ch, "detail": result.get("detail", "failed")})
 
-    return {"success": False, "channel": "none", "detail": "所有通道均失败"}
+    try:
+        update_inbox_task(agent, dispatch_id, "failed", "all channels failed")
+    except KeyError:
+        pass
+    detail = "; ".join(f"{item['channel']}: {item['detail']}" for item in failures)
+    return {
+        "success": False,
+        "channel": "none",
+        "detail": detail or "所有通道均失败",
+        "failures": failures,
+        "dispatch_id": dispatch_id,
+        "task_id": task_id,
+        "status": "failed",
+    }
 
 
 def read_inbox(agent: str) -> list:
     """读取指定 agent 的任务收件箱。"""
     _ensure_inbox()
-    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
+    inbox_file = _inbox_file(agent)
     if not os.path.exists(inbox_file):
         return []
     try:
@@ -472,8 +828,8 @@ def read_inbox(agent: str) -> list:
 
 
 def clear_inbox(agent: str):
-    """清空指定 agent 的任务收件箱。"""
+    """Legacy helper: preserve the ledger file but clear its records."""
     _ensure_inbox()
-    inbox_file = os.path.join(INBOX_DIR, f"{agent}.json")
-    if os.path.exists(inbox_file):
-        os.remove(inbox_file)
+    inbox_file = _inbox_file(agent)
+    with file_lock(inbox_file + ".lock"):
+        atomic_write_json(inbox_file, [])
