@@ -278,7 +278,11 @@ def notify(message, ring=False):
 # ── State Read/Write ───────────────────────────────────────────────────────────
 
 def default_state(project):
-    agents = get_project_agents(project)
+    agents = (
+        proto.schedulable_agents(load_protocol(project))
+        if os.path.exists(protocol_file(project))
+        else [agent for agent in get_agents() if agent != "codex"]
+    )
     first_agent = agents[0] if agents else "agent"
     return {
         "current_agent": first_agent,
@@ -444,14 +448,15 @@ def cmd_configure(args):
 
 def write_agent_manifest(project):
     path = os.path.join(project_collab_dir(project), "AGENTS.md")
-    lines = [f"# Agents — {project}", "", "| Agent | Roles | Driver | Capabilities | Assignment |", "|---|---|---|---|---|"]
+    lines = [f"# Agents — {project}", "", "| Agent | Roles | Driver | Schedulable | Capabilities | Assignment |", "|---|---|---|---|---|---|"]
     protocol = load_protocol(project) if os.path.exists(protocol_file(project)) else None
     for agent in get_project_agents(project):
         meta = protocol.get("agents", {}).get(agent, {}) if protocol else {}
         roles = ", ".join(meta.get("roles") or [meta.get("role") or get_agent_label(agent)])
         capabilities = ", ".join(meta.get("capabilities") or []) or "—"
         assignment = meta.get("assignment") or get_agent_assignment(agent) or "—"
-        lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {capabilities} | {assignment} |")
+        schedulable = "yes" if meta.get("schedulable", True) else "no"
+        lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {schedulable} | {capabilities} | {assignment} |")
     atomic_write_text(path, "\n".join(lines) + "\n")
 
 
@@ -484,6 +489,7 @@ def cmd_agent(args, project=None):
             "cost_tier": getattr(args, "cost_tier", None) or old.get("cost_tier", "medium"),
             "assignment": args.assignment if args.assignment is not None else old.get("assignment", ""),
             "enabled": True,
+            "schedulable": getattr(args, "schedulable", None) if getattr(args, "schedulable", None) is not None else old.get("schedulable", True),
         }
         data.setdefault("agents", {})[args.name] = proto.normalize_agent(args.name, meta)
         proto.save(project_dir(project), data)
@@ -1209,7 +1215,7 @@ def cmd_handoff(project, args):
     state = load_state(project)
     ensure_project_path(project, state)
     current = state["current_agent"]
-    agents = get_project_agents(project)
+    agents = proto.schedulable_agents(load_protocol(project))
     idx = agents.index(current) if current in agents else 0
     requested_agent = getattr(args, "to", None)
     if requested_agent and requested_agent not in agents:
@@ -1349,8 +1355,8 @@ def cmd_new(project, args):
         state = load_state(project)
         task = state.setdefault("task", {})
         if owner:
-            if owner not in get_project_agents(project):
-                print(f"Error: unknown owner '{owner}'. Run: plow-whip agent set {owner}", file=sys.stderr)
+            if owner not in proto.schedulable_agents(load_protocol(project)):
+                print(f"Error: owner '{owner}' is unknown or non-schedulable; use submit for control-plane intake", file=sys.stderr)
                 sys.exit(1)
             task["owner"] = owner
         if first_action:
@@ -1738,6 +1744,7 @@ def cmd_start(project, args):
 
 def cmd_submit(project, args):
     from . import tasking
+    from . import codex_desktop
 
     payload = tasking.submit(
         project,
@@ -1746,6 +1753,7 @@ def cmd_submit(project, args):
         planner=getattr(args, "planner", None),
         target_branch=getattr(args, "target_branch", None),
         source=getattr(args, "source", "current_session"),
+        interaction=codex_desktop.interaction(project),
         replace=getattr(args, "replace", False),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1920,8 +1928,8 @@ def cmd_goal(project, args):
                 str(value).strip().lower() for value in item.get("capabilities", []) if str(value).strip()
             ))
             owner = item.get("owner")
-            if owner and owner not in proto.enabled_agents(data):
-                raise ValueError(f"unknown milestone owner: {owner}")
+            if owner and owner not in proto.schedulable_agents(data):
+                raise ValueError(f"milestone owner is unknown or non-schedulable: {owner}")
             if not owner:
                 owner = routing.select_agent(
                     data, role=role, capabilities=capabilities,
@@ -1976,6 +1984,12 @@ def cmd_task(project, args):
         if owner not in get_project_agents(project):
             print(f"Error: unknown project agent '{owner}'", file=sys.stderr)
             sys.exit(1)
+        if owner not in proto.schedulable_agents(load_protocol(project)):
+            print(
+                f"Error: '{owner}' is a non-schedulable control plane; use `plow-whip --project {project} submit ...` instead.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         task = {
             "id": task_id,
             "title": args.title,
@@ -2323,6 +2337,15 @@ def cmd_sync():
     print()
 
 
+def cmd_desktop(project, args):
+    from . import codex_desktop
+
+    payload = codex_desktop.sync(project) if args.action == "sync" else codex_desktop.status(project)
+    if args.action == "sync" and payload.get("status") == "synced":
+        check_and_rotate_agent(project, "codex", topic="desktop_sync")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def cmd_scheduler(args):
     from . import scheduler
 
@@ -2403,7 +2426,8 @@ def main():
     agent_set.add_argument("--role", help="Role label")
     agent_set.add_argument("--roles", nargs="+", help="Stable routing role tags")
     agent_set.add_argument("--capabilities", nargs="*", help="Capability tags")
-    agent_set.add_argument("--driver", choices=["codex_cli", "cursor_cli", "simple_tasker", "zellij", "file"], help="Execution driver")
+    agent_set.add_argument("--driver", choices=["codex_cli", "cursor_cli", "simple_tasker", "zellij", "file", "control"], help="Execution driver")
+    agent_set.add_argument("--schedulable", action=argparse.BooleanOptionalAction, help="Allow scheduler/task ownership")
     agent_set.add_argument("--priority", type=int, help="Routing priority")
     agent_set.add_argument("--cost-tier", choices=["low", "medium", "high"], help="Token/cost tier")
     agent_set.add_argument("--assignment", help="Current assignment")
@@ -2431,6 +2455,8 @@ def main():
     submit_parser.add_argument("--target-branch", help="Fast-forward delivery target (default main)")
     submit_parser.add_argument("--source", default="current_session", help="Interaction source identifier")
     submit_parser.add_argument("--replace", action="store_true", help="Deliberately replace current active work")
+    desktop_parser = sub.add_parser("desktop", help="Sync or inspect the local Codex Desktop conversation")
+    desktop_parser.add_argument("action", choices=["sync", "status"])
 
     plan_parser = sub.add_parser("plan", help="Propose or confirm a non-goal milestone workflow")
     plan_sub = plan_parser.add_subparsers(dest="action", required=True)
@@ -2727,6 +2753,8 @@ def main():
         cmd_start(project, args)
     elif args.command == "submit":
         cmd_submit(project, args)
+    elif args.command == "desktop":
+        cmd_desktop(project, args)
     elif args.command == "plan":
         cmd_plan(project, args)
     elif args.command == "review":

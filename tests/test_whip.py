@@ -25,6 +25,7 @@ from plow_whip.whip import (
     filter_by_agent,
     generate_notification,
     generate_whip_prompt,
+    run_once,
     scan_all_projects,
 )
 from plow_whip.agent_flow import save_config
@@ -189,7 +190,7 @@ class TestFilters(WhipTestBase):
     def test_filter_by_agent(self):
         af.cmd_init("P1")
         af.cmd_init("P2")
-        # P2 handoff to codex
+        # P2 handoff skips the non-schedulable Codex Desktop control plane.
         args = FakeArgs(
             output="Done", next="Next", phase="P", status="done",
             day=None, topic=None, project_dir=None, files=None, verify=None,
@@ -197,11 +198,11 @@ class TestFilters(WhipTestBase):
         af.cmd_handoff("P2", args)
         results = scan_all_projects()
         qoder_results = filter_by_agent(results, "qoder")
-        codex_results = filter_by_agent(results, "codex")
+        cursor_results = filter_by_agent(results, "cursor")
         self.assertEqual(len(qoder_results), 1)
         self.assertEqual(qoder_results[0]["project"], "P1")
-        self.assertEqual(len(codex_results), 1)
-        self.assertEqual(codex_results[0]["project"], "P2")
+        self.assertEqual(len(cursor_results), 1)
+        self.assertEqual(cursor_results[0]["project"], "P2")
 
     def test_filter_active(self):
         af.cmd_init("Active")
@@ -278,6 +279,14 @@ class TestWhipPrompt(WhipTestBase):
 
 
 class TestCmdWhip(WhipTestBase):
+    def test_scheduler_syncs_desktop_before_existing_rotation(self):
+        af.cmd_init("TestProject")
+        events = []
+        with patch("plow_whip.codex_desktop.sync", side_effect=lambda *args, **kwargs: events.append("sync") or {}):
+            with patch.object(af, "auto_rotate_all_agents", side_effect=lambda project: events.append("rotate") or {"agents": [], "files": []}):
+                run_once(auto_rotate=True)
+        self.assertEqual(events[:2], ["sync", "rotate"])
+
     @patch("plow_whip.whip.run_once")
     def test_legacy_daemon_flags_run_once(self, mock_once):
         mock_once.return_value = {"status": "ok", "projects": []}

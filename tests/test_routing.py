@@ -46,6 +46,18 @@ class RoutingTest(unittest.TestCase):
         compact = routing.compact_registry(self.protocol)
         self.assertNotIn("assignment", compact[0])
 
+    def test_non_schedulable_control_plane_is_never_selected_or_executed(self):
+        self.protocol["agents"]["desktop"] = {
+            "roles": ["backend"], "capabilities": ["python", "api"],
+            "driver": "codex_cli", "priority": 999, "enabled": True,
+            "schedulable": False,
+        }
+        self.assertEqual(
+            routing.select_agent(self.protocol, role="backend", capabilities=["python"]),
+            "backend-primary",
+        )
+        self.assertEqual(routing.execution_routes(self.protocol, "desktop", lambda _: True), [])
+
 
 if __name__ == "__main__":
     unittest.main()

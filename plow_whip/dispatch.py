@@ -174,7 +174,6 @@ def _execution_routes(agent: str, project: str | None = None) -> list[dict]:
         )
     legacy = {
         "cursor_cli": ["cursor_cli", "codex_cli"],
-        "codex": ["codex_cli", "cursor_cli"],
         "codex_cli": ["codex_cli", "cursor_cli"],
         "cursor": ["zellij"],
     }
@@ -872,6 +871,13 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     返回:
       {"success": bool, "channel": str, "detail": str}
     """
+    if os.path.exists(af.protocol_file(project)):
+        meta = af.load_protocol(project).get("agents", {}).get(agent, {})
+        if not meta.get("schedulable", True):
+            return {
+                "success": False, "channel": "none", "status": "rejected_control_plane",
+                "detail": f"{agent} is a non-schedulable control plane; use submit to assign a schedulable Agent",
+            }
     use_brain = kwargs.pop("use_brain", False)
     dispatch_id = kwargs.pop("dispatch_id", None) or f"DP-{uuid.uuid4().hex[:12]}"
     task_id = kwargs.pop("task_id", None)

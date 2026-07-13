@@ -163,6 +163,11 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
         task = state.get("task") or {}
         status = state.get("status", "unknown")
         task_status = task.get("status", "unknown")
+        try:
+            agent_meta = af.load_protocol(name).get("agents", {}).get(task.get("owner") or state.get("current_agent"), {})
+            schedulable = agent_meta.get("schedulable", True)
+        except (OSError, ValueError, json.JSONDecodeError):
+            schedulable = False
         expected_status = {"active": "in_progress"}.get(task_status, task_status)
         stale = _is_stale(state, stale_minutes)
         mismatch = task_status != "unknown" and status != expected_status
@@ -173,10 +178,11 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             "task_id": task.get("id", ""),
             "task_status": task_status,
             "automation_enabled": bool(state.get("automation_enabled", True)),
+            "schedulable": schedulable,
             "updated_at": state.get("updated_at", ""),
             "stale": stale,
-            "needs_recovery": stale or mismatch,
-            "reason": "state_mismatch" if mismatch else "stale" if stale else "healthy",
+            "needs_recovery": schedulable and (stale or mismatch),
+            "reason": "control_plane" if not schedulable else "state_mismatch" if mismatch else "stale" if stale else "healthy",
         })
     return results
 
@@ -211,7 +217,11 @@ def filter_by_agent(results: list, agent: str) -> list:
 
 def filter_active(results: list) -> list:
     """只保留可继续工作的项目；done/blocked 都不可自动派发。"""
-    return [r for r in results if r["status"] not in ("done", "blocked", "blocked_waiting_human")]
+    return [
+        r for r in results
+        if r["status"] not in ("done", "blocked", "blocked_waiting_human")
+        and r.get("schedulable", True)
+    ]
 
 
 # ── 鞭策指令生成 ──────────────────────────────────────────────────────────────
@@ -521,7 +531,12 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
         return {"status": "skipped_already_running", "projects": [], "dispatches": []}
     try:
         rotations = []
+        desktop_sync = []
         with contextlib.redirect_stdout(io.StringIO()):
+            from . import codex_desktop
+
+            for project in af.list_collab_projects():
+                desktop_sync.append(codex_desktop.sync(project, allow_env=False))
             if auto_rotate:
                 for project in af.list_collab_projects():
                     summary = af.auto_rotate_all_agents(project)
@@ -551,6 +566,7 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             "dispatches": dispatches,
             "supervision": supervision,
             "rotations": rotations,
+            "desktop_sync": desktop_sync,
         }
         try:
             os.makedirs(af.CONFIG_DIR, exist_ok=True)

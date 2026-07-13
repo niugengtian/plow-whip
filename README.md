@@ -33,13 +33,13 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 plow-whip 将“谁负责”与“用什么执行”分开：
 
 ```text
-Submit（Codex Desktop、CLI 或其他入口）
+Submit（Codex Desktop 控制面、CLI 或其他入口）
   └─ 本地零 Token 分类：direct / simple / needs_planner
       ├─ direct：明确且有界，直接交给指定 CLI
       ├─ simple：交给文件持久化的 DeepSeek simple-tasker
       └─ needs_planner：Codex CLI 规划，必须由人确认里程碑
           └─ Task（当前唯一原子工作单元）
-          ├─ Registry：有哪些长期 Agent，它们的角色、能力和 Driver
+          ├─ Registry：有哪些长期 Agent，它们的角色、能力、Driver 和 schedulable
           ├─ Router：按角色、能力、优先级、成本和可用性确定性选人
           ├─ Driver：codex_cli / cursor_cli / simple_tasker / zellij / file
           └─ State：进度、下一步、PID、验收、会话、熔断与 Git 生命周期
@@ -237,7 +237,7 @@ plow-whip scheduler status
 
 ### Registry、Router 与 Driver
 
-项目 Registry 为每个逻辑 Agent 保存角色、能力、Driver、优先级、成本档和当前 assignment：
+项目 Registry 为每个逻辑 Agent 保存角色、能力、Driver、`schedulable`、优先级、成本档和当前 assignment：
 
 ```bash
 plow-whip --project MyProject agent set backend-primary \
@@ -257,7 +257,18 @@ plow-whip --project MyProject agent set backend-backup \
   --priority 70
 ```
 
-Router 根据 `roles + capabilities + enabled + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。可执行 Driver 是封闭集合：`codex_cli`、`cursor_cli`、`simple_tasker`、`zellij`、`file`。旧 schema v3 配置可迁移为 v4，补齐稳定角色标签和执行字段。
+Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面，只负责人工交互与 `submit`，不会成为 Task owner、执行器、CLI Session、重试或故障切换目标；`codex_cli` 是独立的 Planner、实现者和 Reviewer。可执行 Driver 是封闭集合：`codex_cli`、`cursor_cli`、`simple_tasker`、`zellij`、`file`。
+
+### Codex Desktop 对话同步
+
+`submit` 会用 `CODEX_THREAD_ID` 绑定并记录当前 Desktop interaction。显式查看或同步：
+
+```bash
+plow-whip --project MyProject desktop status
+plow-whip --project MyProject desktop sync
+```
+
+同步完全在本地解析 Codex JSONL，不调用模型、不消耗 Token。它用本机 plow-whip 配置目录中的字节 checkpoint 去重；若受管沙箱不允许写用户配置，则回退到 Git 忽略的 `collab/.runtime/codex-desktop-sync.json`。同步只追加 user 文本和 assistant 的 commentary/final 文本到 `collab/conversations/codex/current.md`；developer、system、reasoning、tool、图片及其他内容全部排除。checkpoint 只保存 thread ID、字节偏移和同步时间，不进入 canonical/Hot 或版本库，也不保存被过滤内容或本机源文件绝对路径。scheduler 每轮先续同步已绑定线程，再使用原有阈值轮转 `current.md`。
 
 ### Task Planner 与粗粒度里程碑
 
@@ -400,13 +411,14 @@ collab/
 | `reset` | 重置项目状态 |
 | `archive` | 归档已完成项目 |
 | `sync` | 将框架派生模板同步到已配置项目 |
+| `desktop sync` / `status` | 增量同步或查看 Codex Desktop 文本镜像状态 |
 
 ### Agent、启动与路由
 
 | 命令 | 用途 |
 |---|---|
 | `agent list` | 列出项目 Registry |
-| `agent set` | 设置角色、能力、Driver、优先级、成本和 assignment |
+| `agent set` | 设置角色、能力、Driver、schedulable、优先级、成本和 assignment |
 | `start` | 返回完整但有界的最小启动 payload；Agent 唯一启动入口 |
 | `context-pack` | `start` 的废弃兼容别名 |
 | `drive` | 通过 Registry 中配置的 Driver 执行指定逻辑 Agent |
@@ -422,7 +434,7 @@ collab/
 | `plan confirm` / `reject` / `status` | 确认、退回或查看非 Goal 计划 |
 | `review reject` | 独立 Reviewer 拒绝并恢复原执行器 Session 修复 |
 | `automation enable` / `disable` / `status` | 控制单个项目的无人值守开关 |
-| `task start` | 创建当前原子任务及其验收、验证和规则标签 |
+| `task start` | 创建当前原子任务；控制面调用会被拒绝并引导使用 `submit` |
 | `task progress` | 原子回写产出、下一步，并可更新验收与验证命令 |
 | `task block` | 写入阻塞原因并暂停自动派发 |
 | `task complete` | 运行验证命令；通过后完成任务并推进 Goal |

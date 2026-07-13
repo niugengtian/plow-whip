@@ -27,7 +27,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.old_file, self.old_dir = af.CONFIG_FILE, af.CONFIG_DIR
         af.CONFIG_DIR = self.config
         af.CONFIG_FILE = os.path.join(self.config, "config.json")
-        af.save_config({"projects_dir": self.projects, "agents": ["codex", "builder"]})
+        af.save_config({"projects_dir": self.projects, "agents": ["codex", "codex_cli", "builder"]})
         af.cmd_init("P")
 
     def tearDown(self):
@@ -36,7 +36,8 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def test_protocol_is_truth_and_handbook_is_derived(self):
         data = af.load_protocol("P")
-        self.assertEqual(protocol.enabled_agents(data), ["codex", "builder"])
+        self.assertEqual(protocol.enabled_agents(data), ["codex", "codex_cli", "builder"])
+        self.assertEqual(protocol.schedulable_agents(data), ["codex_cli", "builder"])
         self.assertIn("R004", protocol.effective_rules(data))
         with open(af.handbook_file("P"), encoding="utf-8") as f:
             self.assertIn("子智能体", f.read())
@@ -81,7 +82,8 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(updated["schema_version"], 4)
         self.assertEqual(updated["agents"]["builder"]["roles"], ["backend"])
         self.assertEqual(updated["agents"]["builder"]["driver"], "file")
-        self.assertEqual(updated["agents"]["codex"]["driver"], "codex_cli")
+        self.assertEqual(updated["agents"]["codex"]["driver"], "control")
+        self.assertFalse(updated["agents"]["codex"]["schedulable"])
 
     def test_future_protocol_schema_is_not_auto_repaired(self):
         data = af.load_protocol("P")
@@ -235,12 +237,12 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertIn("broken", task["last_output"])
 
     def test_goal_plan_advances_coarse_milestones_and_finishes_only_at_end(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex"))
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         state = af.load_state("P")
         self.assertEqual(state["goal"]["status"], "planning")
         plan = [
             {"title": "Build and test feature", "owner": "builder", "acceptance": ["unit tests pass"]},
-            {"title": "Final integration acceptance", "owner": "codex", "acceptance": ["full suite passes"], "final_acceptance": True},
+            {"title": "Final integration acceptance", "owner": "codex_cli", "acceptance": ["full suite passes"], "final_acceptance": True},
         ]
         af.cmd_goal("P", FakeArgs(action="plan", context_summary="Reusable compact context", plan_json=json.dumps(plan)))
         state = af.load_state("P")
@@ -252,7 +254,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         af.cmd_task("P", FakeArgs(action="complete", output="Feature done", next=None, json=False))
         state = af.load_state("P")
         self.assertEqual(state["task"]["title"], "Final integration acceptance")
-        self.assertEqual(state["current_agent"], "codex")
+        self.assertEqual(state["current_agent"], "codex_cli")
         self.assertEqual(state["goal"]["status"], "active")
         self.assertEqual(len(state["goal"]["completed"]), 1)
         af.cmd_task("P", FakeArgs(action="complete", output="Integrated", next=None, json=False))
@@ -282,7 +284,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
             "driver": "codex_cli", "priority": 90,
         })
         protocol.save(af.project_dir("P"), data)
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex"))
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         plan = [
             {"title": "Build API", "role": "backend", "capabilities": ["python", "api"], "acceptance": ["API passes"]},
             {"title": "Audit release", "role": "reviewer", "capabilities": ["review"], "acceptance": ["release passes"], "final_acceptance": True},
@@ -296,10 +298,10 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertTrue(state["goal"]["queue"][0]["independent_acceptance"])
 
     def test_new_goal_is_queued_instead_of_replacing_active_goal(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex", replace=False))
+        af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex_cli", replace=False))
         first_id = af.load_state("P")["goal"]["id"]
 
-        af.cmd_goal("P", FakeArgs(action="start", text="Second", owner="codex", replace=False))
+        af.cmd_goal("P", FakeArgs(action="start", text="Second", owner="codex_cli", replace=False))
 
         state = af.load_state("P")
         self.assertEqual(state["goal"]["id"], first_id)
@@ -307,13 +309,13 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["goal_queue"][0]["status"], "queued")
 
     def test_queued_goal_activates_after_current_goal_finishes(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex", replace=False))
+        af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex_cli", replace=False))
         first_plan = [{
-            "title": "Review first", "owner": "codex", "role": "reviewer",
+            "title": "Review first", "owner": "codex_cli", "role": "reviewer",
             "acceptance": ["first passes"], "final_acceptance": True,
         }]
         af.cmd_goal("P", FakeArgs(action="plan", context_summary="first", plan_json=json.dumps(first_plan)))
-        af.cmd_goal("P", FakeArgs(action="start", text="Second", owner="codex", replace=False))
+        af.cmd_goal("P", FakeArgs(action="start", text="Second", owner="codex_cli", replace=False))
 
         af.cmd_task("P", FakeArgs(action="complete", output="First done", next=None, json=False))
 
@@ -334,7 +336,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
             "driver": "codex_cli", "priority": 80,
         })
         protocol.save(af.project_dir("P"), data)
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship", owner="codex"))
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship", owner="codex_cli"))
         plan = [
             {"title": "Build", "owner": "worker", "acceptance": ["built"]},
             {"title": "Review", "owner": "worker", "role": "reviewer", "acceptance": ["reviewed"], "final_acceptance": True},
@@ -365,16 +367,16 @@ class ProtocolSchedulerTest(unittest.TestCase):
             af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_plan_rejects_overly_fine_decomposition(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex"))
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         plan = [{"title": f"tiny {i}", "owner": "builder", "acceptance": ["done"], "final_acceptance": i == 7} for i in range(8)]
         with self.assertRaisesRegex(ValueError, "1 to 7"):
             af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_does_not_advance_when_current_milestone_fails_verification(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex"))
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         plan = [
             {"title": "Build", "owner": "builder", "acceptance": ["passes"], "verify_commands": ["test"]},
-            {"title": "Integrate", "owner": "codex", "acceptance": ["passes"], "final_acceptance": True},
+            {"title": "Integrate", "owner": "codex_cli", "acceptance": ["passes"], "final_acceptance": True},
         ]
         af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
         with patch("plow_whip.agent_flow.subprocess.run", return_value=Mock(returncode=1, stdout="", stderr="fail")):

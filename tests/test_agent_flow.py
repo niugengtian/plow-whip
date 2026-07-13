@@ -147,8 +147,8 @@ class TestInit(PlowWhipTestBase):
         self.assertEqual(af.load_protocol("TestProject")["agents"]["builder"]["assignment"], "Build work")
         with open(os.path.join(self.projects_dir, "TestProject", "collab", "AGENTS.md"), encoding="utf-8") as f:
             manifest = f.read()
-        self.assertIn("| `planner` | pm | file | — | Plan work |", manifest)
-        self.assertIn("| `builder` | engineer | file | — | Build work |", manifest)
+        self.assertIn("| `planner` | pm | file | yes | — | Plan work |", manifest)
+        self.assertIn("| `builder` | engineer | file | yes | — | Build work |", manifest)
 
     def test_agent_set_updates_config_and_project(self):
         cmd_init("TestProject")
@@ -169,10 +169,10 @@ class TestInit(PlowWhipTestBase):
         cmd_init("TestProject")  # Should not error
 
     def test_new_creates_project_with_first_action_and_owner(self):
-        args = FakeArgs(first_action="Draft the project plan", owner="codex")
+        args = FakeArgs(first_action="Draft the project plan", owner="cursor")
         cmd_new("NewProject", args)
         state = load_state("NewProject")
-        self.assertEqual(state["current_agent"], "codex")
+        self.assertEqual(state["task"]["owner"], "cursor")
         self.assertEqual(state["next_action"], "Draft the project plan")
         self.assertTrue(os.path.exists(os.path.join(self.projects_dir, "NewProject", "collab", "CONVENTIONS.md")))
 
@@ -279,7 +279,7 @@ class TestHandoff(PlowWhipTestBase):
         )
         cmd_handoff("TestProject", args)
         state = load_state("TestProject")
-        self.assertEqual(state["current_agent"], "codex")
+        self.assertEqual(state["current_agent"], "cursor")
         self.assertEqual(state["last_output"], "Done A")
 
     def test_handoff_can_assign_agent_and_record_blockers(self):
@@ -299,8 +299,6 @@ class TestHandoff(PlowWhipTestBase):
         cmd_init("TestProject")
         args = FakeArgs(output="A", next="B", phase="P", status="done",
                         day=None, topic=None, project_dir=None, files=None, verify=None, to=None, blockers=None)
-        cmd_handoff("TestProject", args)
-        self.assertEqual(load_state("TestProject")["current_agent"], "codex")
         cmd_handoff("TestProject", args)
         self.assertEqual(load_state("TestProject")["current_agent"], "cursor")
         cmd_handoff("TestProject", args)

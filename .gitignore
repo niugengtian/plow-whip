@@ -15,3 +15,4 @@ env/
 *.db
 .DS_Store
 by_rm/
+collab/.runtime/

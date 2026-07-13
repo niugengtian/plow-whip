@@ -22,7 +22,7 @@ DEFAULT_ROLES = {
 }
 
 DEFAULT_AGENT_ROUTING = {
-    "codex": {"roles": ["planner", "coordinator", "reviewer"], "capabilities": ["*"], "driver": "codex_cli", "priority": 60},
+    "codex": {"roles": ["control-plane"], "capabilities": ["human-interaction"], "driver": "control", "priority": 60, "schedulable": False},
     "codex_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "codex_cli", "priority": 50},
     "cursor": {"roles": ["implementation", "reviewer"], "capabilities": ["*"], "driver": "zellij"},
     "cursor_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "cursor_cli", "priority": 70, "cost_tier": "low"},
@@ -33,7 +33,7 @@ DEFAULT_AGENT_ROUTING = {
     },
 }
 
-EXECUTION_DRIVERS = {"codex_cli", "cursor_cli", "simple_tasker", "zellij", "file"}
+EXECUTION_DRIVERS = {"codex_cli", "cursor_cli", "simple_tasker", "zellij", "file", "control"}
 COST_TIERS = {"low", "medium", "high"}
 
 DEFAULT_ORCHESTRATION = {
@@ -54,6 +54,14 @@ def normalize_role(value: str) -> str:
 def normalize_agent(agent: str, meta: dict | None = None) -> dict:
     meta = dict(meta or {})
     defaults = DEFAULT_AGENT_ROUTING.get(agent, {})
+    if agent == "codex":
+        meta.update({
+            "role": "Codex Desktop (Control Plane)",
+            "roles": defaults["roles"],
+            "capabilities": defaults["capabilities"],
+            "driver": defaults["driver"],
+            "schedulable": False,
+        })
     role_label = meta.get("role") or DEFAULT_ROLES.get(agent, agent)
     roles = meta.get("roles") or defaults.get("roles") or [normalize_role(role_label) or agent]
     capabilities = meta.get("capabilities")
@@ -75,6 +83,7 @@ def normalize_agent(agent: str, meta: dict | None = None) -> dict:
         "cost_tier": cost_tier,
         "assignment": meta.get("assignment", ""),
         "enabled": meta.get("enabled", True),
+        "schedulable": meta.get("schedulable", defaults.get("schedulable", True)),
     }
 
 
@@ -312,6 +321,13 @@ def enabled_agents(data: dict) -> list[str]:
     return agents
 
 
+def schedulable_agents(data: dict) -> list[str]:
+    return [
+        name for name in enabled_agents(data)
+        if data["agents"][name].get("schedulable", True)
+    ]
+
+
 def effective_rules(data: dict) -> dict:
     rules = dict(data.get("global_rules", {}))
     for rule_id, rule in data.get("project_rules", {}).items():
@@ -416,16 +432,18 @@ def render_handbook(data: dict) -> str:
         "| 规则、Registry、编排配置 | `collab/AGENT_PROTOCOL.json` |",
         "| 当前 Task、Workflow、Session 绑定 | `collab/AGENT_STATE.json` |",
         "| Simple-tasker 完整持久会话 | `collab/memory/sessions/<task>_simple_tasker.jsonl` |",
+        "| Codex Desktop 文本镜像 | `collab/conversations/codex/current.md`（checkpoint 位于本机配置，受管环境回退到 Git 忽略的 `collab/.runtime/`） |",
         "| CLI 熔断与 Worker 进程登记 | 框架运行目录中的 `health.json`、`workers.json` |",
         "| 分支与远端交付结果 | Git refs 与远端仓库 |",
         "| 中文手册、Agent 阵容表、兼容 Markdown | 派生视图，不是真源 |",
     ]
-    lines += ["", "## Agent 阵容", "", "| Agent | Roles | Driver | Capabilities | Assignment |", "|---|---|---|---|---|"]
+    lines += ["", "## Agent 阵容", "", "| Agent | Roles | Driver | Schedulable | Capabilities | Assignment |", "|---|---|---|---|---|---|"]
     for agent, meta in data.get("agents", {}).items():
         if meta.get("enabled", True):
             roles = ", ".join(meta.get("roles") or [meta.get("role", agent)])
             capabilities = ", ".join(meta.get("capabilities") or []) or "—"
-            lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {capabilities} | {meta.get('assignment') or '—'} |")
+            schedulable = "yes" if meta.get("schedulable", True) else "no"
+            lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {schedulable} | {capabilities} | {meta.get('assignment') or '—'} |")
     if "goal-planner" in data.get("agents", {}):
         lines += ["", "> `goal-planner` 仅保留兼容；默认规划使用 `orchestration.default_planner`，除非任务明确指定。"]
     if "simple-tasker" not in data.get("agents", {}):
@@ -437,6 +455,8 @@ def render_handbook(data: dict) -> str:
         "## 密钥与网络边界",
         "",
         "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
+        "- Codex Desktop 是 `schedulable=false` 的控制面和人工入口；只能通过 `submit` 分配给可调度 Agent，不拥有或执行 Task。",
+        "- Desktop 同步只读取 `CODEX_THREAD_ID` 绑定的本机 JSONL，仅保存 user 与 assistant commentary/final 文本；system、developer、reasoning、tool 与其他内容不会写入项目。",
         "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",
         "- Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。",
         "- 国内网络、海外出口、TLS 与 Provider 分开探测；全局海外网络故障暂停外部 CLI，单 Provider 故障只暂停对应 Driver。",

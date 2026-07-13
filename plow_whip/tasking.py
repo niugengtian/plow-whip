@@ -129,7 +129,8 @@ def _agent_for_driver(data: dict, driver: str, role: str | None = None) -> str:
     preferred = driver if driver in data.get("agents", {}) else None
     if preferred:
         meta = data["agents"][preferred]
-        if meta.get("enabled", True) and (not role or role in meta.get("roles", [])):
+        if (meta.get("enabled", True) and meta.get("schedulable", True)
+                and (not role or role in meta.get("roles", []))):
             return preferred
     choices = routing.candidates(data, role=role, driver_available=lambda item: item == driver)
     if not choices:
@@ -144,7 +145,8 @@ def planner_owner(data: dict, preferred: str | None = None) -> str:
     if selected in DRIVER_ALIASES:
         selected = _agent_for_driver(data, DRIVER_ALIASES[selected], role="planner")
     meta = data.get("agents", {}).get(selected)
-    if not meta or not meta.get("enabled", True) or "planner" not in meta.get("roles", []):
+    if (not meta or not meta.get("enabled", True) or not meta.get("schedulable", True)
+            or "planner" not in meta.get("roles", [])):
         raise ValueError(f"configured planner is not an enabled planner: {selected}")
     return selected
 
@@ -276,8 +278,8 @@ def _plan_milestones(data: dict, workflow: dict, raw: list[dict]) -> list[dict]:
         if requested_driver == "simple_tasker":
             raise ValueError("planner-to-simple-tasker milestone routing is reserved for a future version")
         if owner:
-            if owner not in proto.enabled_agents(data):
-                raise ValueError(f"unknown milestone owner: {owner}")
+            if owner not in proto.schedulable_agents(data):
+                raise ValueError(f"milestone owner is unknown or non-schedulable: {owner}")
         elif requested_driver:
             owner = _agent_for_driver(data, requested_driver, role=role)
         else:

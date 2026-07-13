@@ -22,7 +22,8 @@ def candidates(
         driver = meta.get("driver", "file")
         roles = set(meta.get("roles") or [])
         agent_capabilities = set(meta.get("capabilities") or [])
-        if not meta.get("enabled", True) or agent in excluded_agents or driver in excluded_drivers:
+        if (not meta.get("enabled", True) or not meta.get("schedulable", True)
+                or agent in excluded_agents or driver in excluded_drivers):
             continue
         if role and role not in roles:
             continue
@@ -58,12 +59,15 @@ def execution_routes(
     capabilities: list[str] | None = None,
 ) -> list[dict]:
     meta = protocol.get("agents", {}).get(owner, {})
+    if not meta.get("enabled", True) or not meta.get("schedulable", True):
+        return []
     roles = list(meta.get("roles") or [])
     role = role or (roles[0] if roles else None)
     capabilities = list(capabilities if capabilities is not None else (meta.get("capabilities") or []))
     primary_driver = meta.get("driver", "file")
     routes = []
-    if meta.get("enabled", True) and (not driver_available or driver_available(primary_driver)):
+    if (meta.get("enabled", True) and meta.get("schedulable", True)
+            and (not driver_available or driver_available(primary_driver))):
         routes.append({
             "agent": owner, "driver": primary_driver, "roles": roles,
             "capabilities": list(meta.get("capabilities") or []),
@@ -97,9 +101,10 @@ def compact_registry(protocol: dict) -> list[dict]:
             "driver": meta.get("driver", "file"),
             "priority": meta.get("priority", 50),
             "cost_tier": meta.get("cost_tier", "medium"),
+            "schedulable": meta.get("schedulable", True),
         }
         for agent, meta in protocol.get("agents", {}).items()
-        if meta.get("enabled", True)
+        if meta.get("enabled", True) and meta.get("schedulable", True)
     ]
 
 
