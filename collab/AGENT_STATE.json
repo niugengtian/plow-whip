@@ -1,87 +1,46 @@
 {
-  "current_agent": "cursor_cli",
-  "phase": "T-20260713-UNATTENDED-FINAL-REVIEW",
-  "status": "done",
+  "current_agent": "codex",
+  "phase": "T-20260713-DELIVERY-BLOCKED",
+  "status": "blocked",
   "task_context": {
     "day": 0,
     "topic": "",
     "project_dir": ""
   },
-  "last_output": "APPROVED: 原子 claim 经 supervisor.claim_task 统一入口，direct drive(dispatch) 与 scheduler(_spawn) 无旁路；Reviewer 独立 Task 以空 cli_sessions 开新会话，reject_review 恢复 last_implementation 原会话；simple-tasker run_command 过滤 SENSITIVE_ENV 且禁止 env/printenv；检查+修复类任务因 WRITE_SIGNALS 不误判只读；熔断/Git FF/无人值守规则与测试均成立。149 tests OK。",
+  "last_output": "Reviewed commit dca81ae and branch codex/unattended-closed-loop are pushed. Fetch moved origin/main from bf5ba56 to merge commit 4e5a136 (PR #1), so origin/main is not an ancestor of dca81ae; fast-forward is impossible under the approved FF-only/no-rebase rule.",
   "files_changed": [],
-  "verify_commands": [
-    "python3 -m unittest discover -s tests"
+  "verify_commands": [],
+  "assigned_agent": "codex",
+  "blockers": [
+    "origin/main moved to 4e5a136 and cannot fast-forward to dca81ae"
   ],
-  "assigned_agent": "cursor_cli",
-  "blockers": [],
   "last_wake_hash": "2c59ed653bda274e5e7c2513d9d088b01aa275ca00075359d4247ccc8fcbc21b",
   "last_woken_at": "2026-07-13T19:06:09",
   "wake_count": 1,
-  "next_action": "",
-  "updated_at": "2026-07-13T23:47:05",
+  "next_action": "Human must choose whether to permit rebasing/cherry-picking dca81ae onto origin/main, or another explicit integration method.",
+  "updated_at": "2026-07-13T23:49:48",
   "project_id": "plow-whip",
   "project_root": ".",
   "task": {
-    "id": "T-20260713-UNATTENDED-FINAL-REVIEW",
-    "title": "Final independent review after atomic claim fixes",
-    "goal": "Final independent review after atomic claim fixes",
-    "owner": "cursor_cli",
-    "status": "done",
-    "next_action": "",
+    "id": "T-20260713-DELIVERY-BLOCKED",
+    "title": "Fast-forward unattended closed loop to main",
+    "goal": "Fast-forward unattended closed loop to main",
+    "owner": "codex",
+    "status": "blocked",
+    "next_action": "Human must choose whether to permit rebasing/cherry-picking dca81ae onto origin/main, or another explicit integration method.",
     "acceptance": [
-      "原子 claim 无旁路",
-      "Reviewer 独立会话成立",
-      "敏感环境不下放",
-      "149+ tests pass"
+      "origin/main fast-forwards to the reviewed commit without rebase, merge commit, or force push"
     ],
-    "verify_commands": [
-      "python3 -m unittest discover -s tests"
+    "verify_commands": [],
+    "rule_tags": [],
+    "last_output": "Reviewed commit dca81ae and branch codex/unattended-closed-loop are pushed. Fetch moved origin/main from bf5ba56 to merge commit 4e5a136 (PR #1), so origin/main is not an ancestor of dca81ae; fast-forward is impossible under the approved FF-only/no-rebase rule.",
+    "blockers": [
+      "origin/main moved to 4e5a136 and cannot fast-forward to dca81ae"
     ],
-    "rule_tags": [
-      "review"
-    ],
-    "last_output": "APPROVED: 原子 claim 经 supervisor.claim_task 统一入口，direct drive(dispatch) 与 scheduler(_spawn) 无旁路；Reviewer 独立 Task 以空 cli_sessions 开新会话，reject_review 恢复 last_implementation 原会话；simple-tasker run_command 过滤 SENSITIVE_ENV 且禁止 env/printenv；检查+修复类任务因 WRITE_SIGNALS 不误判只读；熔断/Git FF/无人值守规则与测试均成立。149 tests OK。",
-    "blockers": [],
     "decision_ids": [],
-    "cli_sessions": {
-      "cursor_cli": {
-        "session_id": "49a7e8b4-f52b-44a2-a03d-04d2a6ab7e10",
-        "status": "archived",
-        "created_at": "2026-07-13T23:45:38",
-        "auth_profile": "desktop",
-        "model": null,
-        "archived_at": "2026-07-13T23:46:56"
-      }
-    },
-    "execution": {
-      "dispatch_id": "DP-48b8b07451ce",
-      "driver": "cursor_cli",
-      "logical_owner": "cursor_cli",
-      "status": "completed",
-      "claimed_at": "2026-07-13T23:45:30",
-      "cli_pid": 32015,
-      "cli_started_at": "2026-07-13T23:45:30",
-      "executor": "cursor_cli",
-      "session_id": "49a7e8b4-f52b-44a2-a03d-04d2a6ab7e10",
-      "pid": 32015,
-      "auth_profile": "desktop",
-      "attempts": [
-        {
-          "profile": "desktop",
-          "model": null,
-          "returncode": 0
-        }
-      ]
-    },
-    "verification": [
-      {
-        "command": "python3 -m unittest discover -s tests",
-        "returncode": 0,
-        "output": "collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpsuqsx5o_/projects/DoneProject/collab/AGENT_STATE.json\n   Run: plow-whip --project DoneProject start --agent qoder --json\n\n\n🆕 Project 'ProjectA' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectA/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectA start --agent qoder --json\n\n\n🆕 Project 'ProjectB' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmpao0yew45/projects/ProjectB/collab/AGENT_STATE.json\n   Run: plow-whip --project ProjectB start --agent qoder --json\n\n\n🆕 Project 'TestProject' initialized!\n   collab/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab\n   memory/: /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab/memory\n   state:   /var/folders/h6/v4h175gn2r93rvzvym11x_5m0000gn/T/tmp0ll936rv/projects/TestProject/collab/AGENT_STATE.json\n   Run: plow-whip --project TestProject start --agent qoder --json\n\n....................................................................................................................warning: continuous whip flags are deprecated; install the native scheduler for repetition\n.................................\n----------------------------------------------------------------------\nRan 149 tests in 4.676s\n\nOK"
-      }
-    ]
+    "cli_sessions": {}
   },
-  "revision": 101,
+  "revision": 103,
   "last_dispatch_id": "DP-061b107fc9bc",
   "last_wake_status": "completed",
   "automation_enabled": true,

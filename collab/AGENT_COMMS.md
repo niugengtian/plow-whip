@@ -1,4 +1,4 @@
-<!-- Previous messages archived to: /Users/niugengtian/work/plow-whip/collab/memory/sessions/20260713_234656_951857_AGENT_COMMS.md -->
+<!-- Previous messages archived to: /Users/niugengtian/work/plow-whip/collab/memory/sessions/20260713_234948_670379_AGENT_COMMS.md -->
 
 # Agent Message Board — plow-whip
 
@@ -9,14 +9,6 @@
 ## Recent Messages
 
 > **Leave new messages below "Recent Messages", keep the latest 3. Move older to archive.**
-
-### [system] 2026-07-13T19:05:48
-
-task T-20260713190011 complete: README 产品级首页重构完成：首屏明确产品、受众与差异；提供安装到首个可验证任务的最短路径；完整覆盖 Registry/Router/Driver、原子状态机、Goal、原生 Scheduler、真实无人值守链路与边界、CLI 认证和会话生命周期；新增完整命令索引与贡献入口。README 内部锚点和本地链接已校验。
-
-### [system] 2026-07-13T23:38:07
-
-task T-20260713-UNATTENDED-REVIEW start: 严格只读审查当前 codex/unattended-closed-loop 工作区相对 HEAD 的全部 tracked 与 untracked 变更，不得修改任何实现、测试、文档或配置文件。重点检查：任务分类与 Planner 人工确认门禁；simple-tasker 沙箱、持久会话、Key 脱敏；scheduler/worker 原子性、每 CLI 并发 5、重试与独立熔断；Reviewer 回退原 Session；Git 分支及 fast-forward 安全。必须查看 git status 和所有未跟踪新文件，并运行 python3 -m unittest discover -s tests。若无阻断问题，task complete 并在 output 中给出 approved 摘要；若发现问题，只用 task progress 写入按严重度和文件行号排列的 findings，保持任务 active，绝不自行修改。
 
 ### [system] 2026-07-13T23:40:32
 
@@ -29,3 +21,11 @@ task T-20260713-UNATTENDED-FINAL-REVIEW start: 严格只读复审当前工作区
 ### [system] 2026-07-13T23:46:56
 
 task T-20260713-UNATTENDED-FINAL-REVIEW complete: APPROVED: 原子 claim 经 supervisor.claim_task 统一入口，direct drive(dispatch) 与 scheduler(_spawn) 无旁路；Reviewer 独立 Task 以空 cli_sessions 开新会话，reject_review 恢复 last_implementation 原会话；simple-tasker run_command 过滤 SENSITIVE_ENV 且禁止 env/printenv；检查+修复类任务因 WRITE_SIGNALS 不误判只读；熔断/Git FF/无人值守规则与测试均成立。149 tests OK。
+
+### [system] 2026-07-13T23:49:40
+
+task T-20260713-DELIVERY-BLOCKED start: Wait for human direction because origin/main moved to merge commit 4e5a136 and cannot fast-forward from dca81ae
+
+### [system] 2026-07-13T23:49:48
+
+task T-20260713-DELIVERY-BLOCKED block: Reviewed commit dca81ae and branch codex/unattended-closed-loop are pushed. Fetch moved origin/main from bf5ba56 to merge commit 4e5a136 (PR #1), so origin/main is not an ancestor of dca81ae; fast-forward is impossible under the approved FF-only/no-rebase rule.
