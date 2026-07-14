@@ -16,7 +16,7 @@ HANDBOOK_NAME = "HANDBOOK.zh-CN.md"
 DEFAULT_ROLES = {
     "codex": "Codex Desktop (Coordinator)",
     "codex_cli": "Codex CLI (Code Owner)",
-    "cursor": "Cursor Desktop",
+    "cursor": "Cursor Desktop (Observer)",
     "cursor_cli": "Cursor CLI",
     "reviewer": "Reviewer",
     "simple-tasker": "Simple Tasker (DeepSeek)",
@@ -25,7 +25,7 @@ DEFAULT_ROLES = {
 DEFAULT_AGENT_ROUTING = {
     "codex": {"roles": ["control-plane"], "capabilities": ["human-interaction"], "driver": "control", "priority": 60, "schedulable": False},
     "codex_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "codex_cli", "priority": 50},
-    "cursor": {"roles": ["control-plane"], "capabilities": ["human-interaction"], "driver": "control", "schedulable": False},
+    "cursor": {"roles": ["observer"], "capabilities": ["status-view"], "driver": "control", "schedulable": False},
     "cursor_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "cursor_cli", "priority": 70, "cost_tier": "low"},
     "reviewer": {"roles": ["reviewer"], "capabilities": ["review"], "driver": "file"},
     "simple-tasker": {
@@ -415,8 +415,9 @@ def render_handbook(data: dict) -> str:
         "",
         "## 入口与状态迁移",
         "",
-        "- 人或外部工具通过 `submit` 投递任务；Agent 每次开始或恢复工作前通过 `start --agent ... --json` 获取有界上下文。",
+        "- 任务通过 `submit` 投递；严格模式默认只接受当前绑定的 Codex Desktop 控制会话，旧模式仍可由 CLI 或其他入口提交。Agent 每次开始或恢复工作前通过 `start --agent ... --json` 获取有界上下文。",
         f"- 当前授权模式为 `{enforcement.get('mode', 'legacy')}`；严格模式下，无 scheduler 租约的会话只能获得 observer 启动包。",
+        "- 严格模式统一使用 `submit` 与 `plan`；旧 `goal start/plan` 只在 legacy 模式保留，不能绕过 worktree、精确 SHA 验收和受控发布。",
         "- 系统定时任务只运行带锁的 `whip --once`；模型仅在存在可恢复的超时 active Task 时由 Worker 调用。",
         "- 机器回写必须同时通过租约、Owner、Task、Driver、dispatch、代数、签名状态有效期和 protocol epoch 校验；活跃 Worker 由 scheduler 续租，人工确认命令拒绝 Worker 租约。",
         "- Codex Desktop 人工控制权同时校验绑定线程与本机 Desktop App 进程父链；环境变量本身不构成授权。严格模式只调度可传递租约的 CLI Driver，zellij 仅保留旧模式兼容。",
@@ -482,7 +483,7 @@ def render_handbook(data: dict) -> str:
         "## 密钥与网络边界",
         "",
         "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
-        "- Codex Desktop 与默认 Cursor Desktop 都是 `schedulable=false` 的控制面和人工入口；只能提交、查看、确认或答复决策，不拥有 Task。",
+        "- Codex Desktop 是默认的可信人工控制面；默认 Cursor Desktop 仅为 `schedulable=false` 的观察身份，不拥有 Task，也不能在严格项目中提交、确认或答复决策。",
         "- 严格项目的控制命令必须由当前绑定的 Codex Desktop thread 授权；Worker 不继承 Desktop origin/thread，清除租约变量也不能变成人工控制面。切换控制会话必须显式执行 Desktop 同步。",
         "- Desktop 同步仅在 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` 时注册 `CODEX_THREAD_ID`，仅保存 user 与 assistant commentary/final_answer（兼容 final）文本；system、developer、reasoning、tool 与其他内容不会写入项目，公开状态只记录不可逆 thread_ref。",
         "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",

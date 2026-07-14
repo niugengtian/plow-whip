@@ -547,6 +547,7 @@ def _dispatch_codex_cli(
     # 获取项目路径
     initial_state = af.load_state(project)
     project_path = af.task_workspace(project, initial_state)
+    canonical_collab = af.project_collab_dir(project)
     
     if not os.path.isdir(project_path):
         return {"success": False, "channel": "codex_cli", "detail": f"项目路径不存在: {project_path}"}
@@ -586,7 +587,13 @@ def _dispatch_codex_cli(
             options = list(prefix[:-1])
             if route.get("model"):
                 options.extend(["--model", route["model"]])
-            options.extend(["exec", "--skip-git-repo-check"])
+            # A strict code task runs in a linked worktree, while canonical
+            # workflow state deliberately remains in the control checkout.
+            # Expose only that collaboration directory as a second writable
+            # root so leased CLI writebacks can reach the state machine.
+            options.extend([
+                "exec", "--add-dir", canonical_collab, "--skip-git-repo-check",
+            ])
             if captured["session_id"]:
                 cmd.extend(options + ["resume", "--json", captured["session_id"], full_prompt])
             else:

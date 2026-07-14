@@ -34,7 +34,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 plow-whip 将“谁负责”与“用什么执行”分开：
 
 ```text
-Submit（Codex Desktop 控制面、CLI 或其他入口）
+Submit（严格模式默认由 Codex Desktop 控制面进入；旧模式可由 CLI 或其他入口进入）
   └─ 本地零 Token 分类：direct / simple / needs_planner
       ├─ direct：明确且有界，直接交给指定 CLI
       ├─ simple：交给文件持久化的 DeepSeek simple-tasker
@@ -192,7 +192,8 @@ plow-whip scheduler status
 - `simple_tasker` 复用现有 DeepSeek Brain API 客户端，但增加项目沙箱工具、Task 级 JSONL 会话、断点恢复和自动上下文压缩；生产 Key 只读取环境变量。
 - `zellij` 依赖可用的本地会话且无法安全继承 Worker 租约，因此只保留旧模式兼容；严格模式只调度可携带租约的 CLI Driver。`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
-- 新项目中的 Codex Desktop 和默认 Cursor Desktop 是控制面：可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
+- 新项目中的 Codex Desktop 是默认可信控制面：可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
+- 默认 Cursor Desktop 只是不可调度的观察身份；本版没有它的可信会话授权适配器，因此不能在严格项目中提交、确认或答复决策。Cursor CLI 仍可由 scheduler 持租约执行任务。
 - 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 按项目 incarnation 固定 strict 模式与 `protocol_epoch`，归档后可安全复用项目名，旧版 pin 会自动迁移。状态和日志只保存不可逆 lease ID，不保存 Token。活跃 Worker 的签名租约元数据由 scheduler 续期，长任务无需更换进程环境中的 Token。
 - Codex Desktop 的提交、确认和决策权限同时要求绑定 Thread 与可信 Desktop App 进程父链；伪造 `CODEX_THREAD_ID` 或 origin 环境变量不能获得控制权。
 - Worker worktree 的 push URL 被禁用；发布由 scheduler 父进程从控制 checkout 完成。目标分支自动更新默认关闭，未配置受保护身份时只推送 `plow/*` 分支；人工合并冲突期间保留 `awaiting_human_merge`，推送完成后由 scheduler 自动对账。
@@ -293,7 +294,7 @@ plow-whip --project MyProject agent set backend-backup \
   --priority 70
 ```
 
-Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面；新项目中的默认 `cursor` 也只作为控制面。它们负责人工交互、`submit`、计划确认和决策答复，不会成为 Task owner、执行器、CLI Session、重试或故障切换目标；`codex_cli` 与 `cursor_cli` 才是执行 Driver。项目可以显式修改 Registry，但严格项目的机器回写仍必须持有租约。
+Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面；默认 `cursor` 是 `schedulable=false` 的观察身份。两者都不会成为 Task owner、执行器、CLI Session、重试或故障切换目标，但本版只有绑定的 Codex Desktop 会话能通过严格项目的人工控制授权；`codex_cli` 与 `cursor_cli` 才是执行 Driver。项目可以显式修改 Registry，但严格项目的机器回写仍必须持有租约。
 
 ### Codex Desktop 对话同步
 
@@ -318,9 +319,9 @@ plow-whip --project MyProject plan propose \
 
 提交计划只会触发人类确认门，不会立刻执行。`goal-planner` 不再参与默认路由。
 
-### 兼容 Goal
+### 兼容 Goal（仅旧模式）
 
-人可以只提交目标：
+严格项目统一使用 `submit` 和 `plan`，执行 `goal start` 或 `goal plan` 会直接拒绝，避免旧 Goal 绕过独立 worktree、精确 SHA 验收和受控发布。仅旧模式项目保留以下兼容入口：
 
 ```bash
 plow-whip --project MyProject goal start "交付可上线的登录功能"
@@ -478,9 +479,9 @@ collab/
 | `task complete` | 运行验证命令；通过后完成任务并推进 Goal |
 | `decision request` | Worker 撤销当前租约并提交 2–3 个必须由人选择的方案 |
 | `decision answer` / `status` | 控制面答复或查看决策；答复后 scheduler 重新签发租约 |
-| `goal start` | 提交或排队一个交付目标；可用 `--replace` 显式替换 |
-| `goal plan` | 提交 1–7 个粗粒度里程碑和压缩上下文 |
-| `goal status` | 查看当前 Goal 与进度 |
+| `goal start` | 仅旧模式：提交或排队一个交付目标；严格模式使用 `submit` |
+| `goal plan` | 仅旧模式：提交 1–7 个粗粒度里程碑和压缩上下文 |
+| `goal status` | 查看旧模式 Goal 与进度；严格模式只保留只读查看 |
 | `handoff` | 将当前工作、证据、下一步和 owner 一次性交接 |
 
 ### 调度、恢复与投递生命周期

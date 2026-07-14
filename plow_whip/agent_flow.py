@@ -1778,9 +1778,13 @@ def build_start_pack(project, agent=None):
             "progress": f"plow-whip --project {project} task progress --output '...' --next '...'",
             "complete": f"plow-whip --project {project} task complete --output '...'",
             "handoff": f"plow-whip --project {project} handoff --to <agent> --output '...' --next '...'",
-            "goal_plan": f"plow-whip --project {project} goal plan --context-summary '...' --plan-json '[{{...}}]'",
             "plan_propose": f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'",
         }
+        if not leases.is_strict(data):
+            pack["writeback"]["goal_plan"] = (
+                f"plow-whip --project {project} goal plan "
+                "--context-summary '...' --plan-json '[{...}]'"
+            )
     if "planning" in raw_task.get("rule_tags", []):
         pack["routing_catalog"] = routing.planner_catalog(data)
     pack["rules_meta"]["startup_payload_max_chars"] = START_PACK_MAX_CHARS
@@ -1976,6 +1980,10 @@ def _activate_goal(state, data, goal):
 def cmd_goal(project, args):
     state = load_state(project)
     data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+    if leases.is_strict(data) and args.action != "status":
+        raise ValueError(
+            "strict projects do not support the legacy goal workflow; use submit and plan instead"
+        )
     if args.action == "start":
         goal_id = f"G-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         goal = _goal_record(goal_id, args.text, getattr(args, "owner", None))

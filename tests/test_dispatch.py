@@ -146,6 +146,11 @@ class TestDispatchMain(DispatchTestBase):
     @patch("plow_whip.dispatch.subprocess.Popen")
     def test_codex_exit_without_state_progress_is_failure(self, mock_popen, _mock_which):
         af.cmd_init("P1")
+        workspace = os.path.join(self.config_dir, "worktrees", "P1", "T-work")
+        os.makedirs(workspace)
+        state = af.load_state("P1")
+        state["workflow"] = {"git": {"workspace_ref": "P1/T-work"}}
+        af.save_state("P1", state)
         process = mock_popen.return_value
         process.pid = 123
         process.returncode = 0
@@ -164,6 +169,13 @@ class TestDispatchMain(DispatchTestBase):
         child_env = mock_popen.call_args.kwargs["env"]
         self.assertNotIn("--ephemeral", command)
         self.assertIn("--skip-git-repo-check", command)
+        self.assertEqual(
+            os.path.realpath(command[command.index("-C") + 1]), os.path.realpath(workspace)
+        )
+        self.assertIn("--add-dir", command)
+        self.assertEqual(
+            command[command.index("--add-dir") + 1], af.project_collab_dir("P1")
+        )
         self.assertNotIn("CODEX_THREAD_ID", child_env)
         self.assertEqual(child_env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"], "Codex CLI")
 

@@ -36,6 +36,19 @@ class ProtocolSchedulerTest(unittest.TestCase):
         af.CONFIG_FILE, af.CONFIG_DIR = self.old_file, self.old_dir
         shutil.rmtree(self.tmpdir)
 
+    def _use_legacy_goal_workflow(self):
+        """Move this isolated fixture to the compatibility mode under test."""
+        data = af.load_protocol("P")
+        paths = (
+            leases._protocol_pin_path(af.CONFIG_DIR, "P", leases.protocol_epoch(data)),
+            leases._legacy_protocol_pin_path(af.CONFIG_DIR, "P"),
+        )
+        for path in paths:
+            if os.path.exists(path):
+                os.unlink(path)
+        data["enforcement"] = {"mode": "legacy"}
+        protocol.save(af.project_dir("P"), data)
+
     def test_protocol_is_truth_and_handbook_is_derived(self):
         data = af.load_protocol("P")
         self.assertEqual(protocol.enabled_agents(data), ["codex", "codex_cli", "builder"])
@@ -59,6 +72,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def test_handbook_explains_latest_unattended_contract(self):
         data = af.load_protocol("P")
+        data["agents"]["cursor"] = protocol.normalize_agent("cursor")
         data["agents"]["goal-planner"] = protocol.normalize_agent("goal-planner", {
             "roles": ["planner"], "capabilities": ["e2e-plan"], "driver": "codex_cli",
         })
@@ -70,6 +84,10 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertIn("goal-planner` 仅保留兼容", rendered)
         self.assertIn("simple-tasker` 是内置按需 Agent", rendered)
         self.assertIn("health.json", rendered)
+        self.assertIn("默认 Cursor Desktop", rendered)
+        self.assertIn("观察身份", rendered)
+        self.assertIn("旧 `goal start/plan` 只在 legacy 模式保留", rendered)
+        self.assertEqual(data["agents"]["cursor"]["roles"], ["observer"])
 
     def test_ensure_migrates_legacy_agent_metadata_to_registry_v4(self):
         data = af.load_protocol("P")
@@ -483,6 +501,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         finalize.assert_not_called()
 
     def test_goal_plan_advances_coarse_milestones_and_finishes_only_at_end(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"]["builder"] = protocol.normalize_agent("builder", {
             "roles": ["implementation"], "driver": "cursor_cli",
@@ -513,16 +532,14 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["goal"]["status"], "done")
         self.assertEqual(state["task"]["status"], "done")
 
-    def test_goal_plan_rejects_non_lease_capable_owner_in_strict_mode(self):
-        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli", replace=False))
-        plan = [
-            {"title": "Build in desktop tab", "owner": "builder", "acceptance": ["built"]},
-            {"title": "Review", "owner": "codex_cli", "acceptance": ["reviewed"], "final_acceptance": True},
-        ]
-        with self.assertRaisesRegex(ValueError, "cannot carry a strict execution lease"):
-            af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
+    def test_strict_mode_rejects_legacy_goal_workflow(self):
+        with self.assertRaisesRegex(ValueError, "strict projects.*use submit"):
+            af.cmd_goal("P", FakeArgs(
+                action="start", text="Ship feature", owner="codex_cli", replace=False,
+            ))
 
     def test_goal_compatibility_path_uses_configured_default_planner(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"]["cursor_cli"] = {"role": "Cursor CLI", "assignment": "", "enabled": True}
         data["agents"]["codex_cli"] = {"role": "Codex CLI", "assignment": "", "enabled": True}
@@ -534,6 +551,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertIn("run tests during planning", next_action)
 
     def test_goal_routes_roles_and_capabilities_without_agent_names(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"]["builder"] = protocol.normalize_agent("builder", {
             "role": "Backend", "roles": ["backend"], "capabilities": ["python", "api"],
@@ -558,6 +576,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertTrue(state["goal"]["queue"][0]["independent_acceptance"])
 
     def test_new_goal_is_queued_instead_of_replacing_active_goal(self):
+        self._use_legacy_goal_workflow()
         af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex_cli", replace=False))
         first_id = af.load_state("P")["goal"]["id"]
 
@@ -569,6 +588,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["goal_queue"][0]["status"], "queued")
 
     def test_queued_goal_activates_after_current_goal_finishes(self):
+        self._use_legacy_goal_workflow()
         af.cmd_goal("P", FakeArgs(action="start", text="First", owner="codex_cli", replace=False))
         first_plan = [{
             "title": "Review first", "owner": "codex_cli", "role": "reviewer",
@@ -586,6 +606,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertEqual(state["goal_history"][0]["text"], "First")
 
     def test_final_acceptance_reroutes_away_from_implementation_owner(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"]["worker"] = protocol.normalize_agent("worker", {
             "roles": ["implementation", "reviewer"], "capabilities": ["*"],
@@ -609,6 +630,7 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertTrue(final["independent_acceptance"])
 
     def test_goal_plan_rejects_final_acceptance_without_independent_agent(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"] = {
             "worker": protocol.normalize_agent("worker", {
@@ -627,12 +649,14 @@ class ProtocolSchedulerTest(unittest.TestCase):
             af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_plan_rejects_overly_fine_decomposition(self):
+        self._use_legacy_goal_workflow()
         af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         plan = [{"title": f"tiny {i}", "owner": "builder", "acceptance": ["done"], "final_acceptance": i == 7} for i in range(8)]
         with self.assertRaisesRegex(ValueError, "1 to 7"):
             af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_does_not_advance_when_current_milestone_fails_verification(self):
+        self._use_legacy_goal_workflow()
         data = af.load_protocol("P")
         data["agents"]["builder"] = protocol.normalize_agent("builder", {
             "roles": ["implementation"], "driver": "cursor_cli",
