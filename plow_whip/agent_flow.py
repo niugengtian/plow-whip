@@ -1879,6 +1879,7 @@ def cmd_submit(project, args):
         requested_cli=getattr(args, "cli", None),
         planner=getattr(args, "planner", None),
         target_branch=getattr(args, "target_branch", None),
+        release_branch=getattr(args, "release_branch", False),
         source=getattr(args, "source", "current_session"),
         interaction=codex_desktop.interaction(project),
         replace=getattr(args, "replace", False),
@@ -2144,6 +2145,20 @@ def cmd_task(project, args):
     state = load_state(project)
     task = state.setdefault("task", {})
     action = args.action
+    release_report_text = getattr(args, "release_gate_report", None)
+    if action == "progress" and release_report_text is not None:
+        from . import git_flow
+
+        workflow = state.get("workflow") or {}
+        git_state = workflow.get("git") or {}
+        if not workflow.get("release_branch") or not git_state.get("release_branch"):
+            raise ValueError("release gate evidence requires an explicitly marked release branch")
+        report = json.loads(release_report_text)
+        git_flow.validate_release_gate(report)
+        git_state["release_gate_report"] = report
+        workflow["release_gate_report"] = report
+        workflow["git"] = git_state
+        state["workflow"] = workflow
     git_delivery_retry = False
     protected_human_pause = False
     if action == "complete" and task.get("status") == "blocked_waiting_human":
@@ -2740,6 +2755,10 @@ def main():
     submit_parser.add_argument("--cli", choices=["codex_cli", "cursor_cli", "simple_tasker", "codex", "cursor", "deepseek"])
     submit_parser.add_argument("--planner", help="Configured planner agent (default codex_cli)")
     submit_parser.add_argument("--target-branch", help="Fast-forward delivery target (default main)")
+    submit_parser.add_argument(
+        "--release-branch", action="store_true",
+        help="Mark this plow-whip release for the final release gate before main",
+    )
     submit_parser.add_argument("--source", default="current_session", help="Interaction source identifier")
     submit_parser.add_argument("--replace", action="store_true", help="Deliberately replace current active work")
     desktop_parser = sub.add_parser("desktop", help="Sync or inspect the local Codex Desktop conversation")
@@ -2796,6 +2815,10 @@ def main():
             item.add_argument("--acceptance", nargs="*")
             item.add_argument("--verify", nargs="*")
             item.add_argument("--rule-tags", nargs="*")
+            item.add_argument(
+                "--release-gate-report",
+                help="Validated JSON evidence for an explicitly marked plow-whip release",
+            )
         item.add_argument("--json", action="store_true")
         if action == "block":
             item.add_argument("--blockers", nargs="+", required=True)

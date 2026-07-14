@@ -29,8 +29,14 @@ def _prepare_git(project: str, workflow: dict) -> dict:
     target = workflow.get("target_branch", "main")
     if leases.is_strict(data):
         workspace = git_flow.workspace_path(af.CONFIG_DIR, project, workflow["id"])
-        return git_flow.prepare_workspace(af.project_dir(project), workspace, workflow["id"], target)
-    return git_flow.prepare_branch(af.project_dir(project), workflow["id"], target)
+        prepared = git_flow.prepare_workspace(af.project_dir(project), workspace, workflow["id"], target)
+    else:
+        prepared = git_flow.prepare_branch(af.project_dir(project), workflow["id"], target)
+    if workflow.get("release_branch"):
+        prepared["release_branch"] = True
+    if workflow.get("release_gate_report"):
+        prepared["release_gate_report"] = copy.deepcopy(workflow["release_gate_report"])
+    return prepared
 EXPLICIT_DRIVER_PATTERNS = (
     (re.compile(r"\b(?:codex[ _-]?cli)\b", re.I), "codex_cli"),
     (re.compile(r"\b(?:cursor[ _-]?cli)\b", re.I), "cursor_cli"),
@@ -236,6 +242,7 @@ def submit(
     requested_cli: str | None = None,
     planner: str | None = None,
     target_branch: str | None = None,
+    release_branch: bool = False,
     source: str = "current_session",
     interaction: dict | None = None,
     replace: bool = False,
@@ -261,6 +268,7 @@ def submit(
         "id": task_id, "title": text, "status": "planning" if decision["route"] == "needs_planner" else "active",
         "route": decision["route"], "classification": decision, "source": source,
         "interaction": interaction or {}, "target_branch": target,
+        "release_branch": bool(release_branch),
         "code_change": bool(decision["code_change"]), "completed": [], "queue": [],
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -597,6 +605,20 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
     protocol = af.load_protocol(project)
     strict = leases.is_strict(protocol)
     if completed_task.get("stage") in ("review", "adjudication"):
+        if strict and workflow.get("code_change"):
+            try:
+                git_flow.assert_review_commit(
+                    af.task_workspace(project, state), workflow.get("candidate_commit", "")
+                )
+            except git_flow.GitFlowBlocked as exc:
+                completed_task.update({
+                    "status": "blocked", "next_action": "Restore the exact review candidate",
+                    "blockers": [str(exc)],
+                })
+                workflow["status"] = "blocked"
+                state["workflow"] = workflow
+                state["task"] = completed_task
+                return completed_task, "blocked"
         workflow.setdefault("review_results", []).append({
             "task_id": completed_task.get("id"),
             "reviewer": completed_task.get("owner"),

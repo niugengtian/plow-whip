@@ -7,6 +7,7 @@ import signal
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import plow_whip.agent_flow as af
@@ -140,6 +141,26 @@ class StrictUnattendedTest(unittest.TestCase):
         self.assertEqual(data["orchestration"]["max_adjudications"], 1)
         self.assertTrue(all(len(item["acceptance"]) == 4 for item in reviews))
 
+    def test_each_passing_review_checks_exact_candidate_before_recording(self):
+        state = af.load_state("P")
+        state["workflow"] = {
+            "id": "T-X", "status": "active", "code_change": True,
+            "candidate_commit": "abc", "queue": [], "review_results": [],
+        }
+        review = {
+            "id": "T-X-REVIEW-1", "owner": "codex_cli", "stage": "review",
+            "status": "done", "last_output": "pass", "blockers": [],
+        }
+        with patch.object(af, "task_workspace", return_value="/tmp/candidate"), patch.object(
+            git_flow, "assert_review_commit",
+            side_effect=git_flow.GitFlowBlocked("reviewer changed task files: app.py"),
+        ) as integrity:
+            completed, action = tasking.advance_after_completion("P", state, review)
+        integrity.assert_called_once_with("/tmp/candidate", "abc")
+        self.assertEqual(action, "blocked")
+        self.assertEqual(completed["blockers"], ["reviewer changed task files: app.py"])
+        self.assertEqual(state["workflow"]["review_results"], [])
+
     def test_review_conflict_creates_exactly_one_pass_or_block_adjudication(self):
         state = af.load_state("P")
         implementation = {
@@ -193,6 +214,49 @@ class StrictUnattendedTest(unittest.TestCase):
         git_flow.validate_release_gate(report)
         with self.assertRaisesRegex(git_flow.GitFlowBlocked, "startup budget"):
             git_flow.validate_release_gate({**report, "startup_tokens": 601})
+
+    def test_explicit_release_marker_reaches_prepared_git_state(self):
+        workflow = {
+            "id": "T-release", "target_branch": "main", "release_branch": True,
+        }
+        with patch.object(leases, "is_strict", return_value=True), patch.object(
+            git_flow, "prepare_workspace",
+            return_value={"branch": "plow/t-release", "target_branch": "main"},
+        ):
+            prepared = tasking._prepare_git("P", workflow)
+        self.assertTrue(prepared["release_branch"])
+
+    def test_controlled_progress_attaches_validated_release_evidence(self):
+        report = {
+            "startup_tokens": 500, "recovery_tokens": 200,
+            "reviewers": 2, "adjudications": 0,
+            "github_e2e": {
+                "repository": git_flow.RELEASE_E2E_REPOSITORY,
+                "fixture": git_flow.RELEASE_E2E_FIXTURE,
+                "success": True, "mutated_main": False,
+                "implementation": "simple-tasker",
+                "reviews": ["codex_cli", "cursor_cli"],
+                "fallback_configured": True,
+                "flow": git_flow.RELEASE_E2E_FLOW,
+                "temporary_branches_deleted": True,
+            },
+        }
+        state = af.load_state("P")
+        state["workflow"] = {
+            "id": "T-release", "status": "active", "release_branch": True,
+            "git": {"release_branch": True, "target_branch": "main"},
+        }
+        state["task"].update({"placeholder": False, "status": "active"})
+        af.save_state("P", state)
+        args = SimpleNamespace(
+            action="progress", output="E2E complete", next="finish reviews",
+            acceptance=None, verify=None, rule_tags=None, json=True,
+            release_gate_report=json.dumps(report),
+        )
+        with patch("builtins.print"):
+            af.cmd_task("P", args)
+        stored = af.load_state("P")["workflow"]
+        self.assertEqual(stored["git"]["release_gate_report"], report)
 
 
 if __name__ == "__main__":
