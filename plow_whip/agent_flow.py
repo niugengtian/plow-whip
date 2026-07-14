@@ -2544,6 +2544,10 @@ def _human_control_action(args) -> str | None:
         return command
     if command in ("rotate", "memory-rotate"):
         return command
+    if command == "rotation-health" and getattr(args, "enforce", False):
+        return "rotation-health.enforce"
+    if command == "memory-budget" and getattr(args, "enforce_rotate", False):
+        return "memory-budget.enforce-rotate"
     if command == "goal" and action == "start":
         return "goal.start"
     return None
@@ -2554,13 +2558,23 @@ def _require_machine_lease(project: str, args) -> None:
     control = _human_control_action(args)
     command = getattr(args, "command", None)
 
-    # Bootstrap and read-only commands must work before a protocol exists.
-    if command in ("init", "new"):
+    protocol_exists = os.path.exists(protocol_file(project))
+    state_exists = os.path.exists(state_file(project))
+    pristine = not protocol_exists and not state_exists
+
+    # A genuinely new project can bootstrap without an existing authority.
+    # Re-running bootstrap or repair against canonical state fails closed.
+    if command in ("init", "new") and pristine:
         return
-    if command in ("repair", "doctor") and not os.path.exists(protocol_file(project)):
+    if command in ("repair", "doctor") and pristine:
         return
     if not operation and not control:
         return
+
+    if not protocol_exists:
+        raise leases.LeaseDenied(
+            "canonical project state exists without an authority protocol; automatic mutation is disabled"
+        )
 
     data = load_protocol(project)
     if not leases.is_strict(data):

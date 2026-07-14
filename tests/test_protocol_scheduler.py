@@ -200,6 +200,41 @@ class ProtocolSchedulerTest(unittest.TestCase):
         af._require_machine_lease("Fresh", FakeArgs(command="doctor", action=None))
         af._require_machine_lease("Fresh", FakeArgs(command="doctor", action=None, repair=True))
 
+    def test_partial_existing_state_cannot_use_bootstrap_exemption(self):
+        os.makedirs(af.project_collab_dir("Partial"), exist_ok=True)
+        with open(af.state_file("Partial"), "w", encoding="utf-8") as file:
+            file.write("{}")
+        for command in ("init", "new", "repair"):
+            with self.subTest(command=command), \
+                 self.assertRaisesRegex(leases.LeaseDenied, "without an authority protocol"):
+                af._require_machine_lease("Partial", FakeArgs(command=command, action=None))
+
+    def test_existing_strict_project_new_requires_human_control(self):
+        before = af.load_state("P")["task"]["next_action"]
+        argv = [
+            "plow-whip", "--project", "P", "new",
+            "--first-action", "replace canonical task",
+        ]
+        with patch.object(sys, "argv", argv), \
+             patch("plow_whip.codex_desktop.authorize_control", return_value=False), \
+             self.assertRaisesRegex(SystemExit, "3"):
+            af.main()
+        self.assertEqual(af.load_state("P")["task"]["next_action"], before)
+
+    def test_rotation_enforcement_aliases_require_human_control(self):
+        actions = (
+            FakeArgs(command="rotation-health", action=None, enforce=True),
+            FakeArgs(command="memory-budget", action=None, enforce_rotate=True),
+        )
+        with patch("plow_whip.codex_desktop.authorize_control", return_value=False):
+            for args in actions:
+                with self.subTest(command=args.command), \
+                     self.assertRaisesRegex(leases.LeaseDenied, "current bound Codex Desktop"):
+                    af._require_machine_lease("P", args)
+        with patch("plow_whip.codex_desktop.authorize_control", return_value=True):
+            for args in actions:
+                af._require_machine_lease("P", args)
+
     def test_doctor_repair_requires_human_control_for_strict_project(self):
         with patch.dict(os.environ, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex CLI"}, clear=True):
             with self.assertRaisesRegex(leases.LeaseDenied, "current bound Codex Desktop"):
