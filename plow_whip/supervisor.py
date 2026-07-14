@@ -77,6 +77,25 @@ def _pid_alive(pid: int | None) -> bool:
         return False
 
 
+def _signal_worker_groups(worker: dict, execution: dict, sig: signal.Signals) -> bool:
+    """Signal surviving CLI/wrapper groups independently; either may exit first."""
+    cli_pid = worker.get("cli_pid") or execution.get("cli_pid")
+    pids = []
+    for pid in (cli_pid, worker.get("pid")):
+        if pid and int(pid) not in pids:
+            pids.append(int(pid))
+    sent = False
+    for pid in pids:
+        if not _pid_alive(pid):
+            continue
+        try:
+            os.killpg(pid, sig)
+            sent = True
+        except OSError:
+            continue
+    return sent
+
+
 def execution_is_live(execution: dict, excluding_dispatch: str | None = None) -> bool:
     """Treat a claimed execution as live before its child PID is available."""
     if execution.get("status") not in ("starting", "running", "stopping", "revoked"):
@@ -136,7 +155,7 @@ def reap_workers() -> dict:
     def reap(registry: dict) -> dict:
         live, finished = [], []
         for worker in registry.get("workers", []):
-            if _pid_alive(worker.get("pid")):
+            if _pid_alive(worker.get("pid")) or _pid_alive(worker.get("cli_pid")):
                 live.append(worker)
                 continue
             result = {}
@@ -315,11 +334,9 @@ def _stop_open_circuit_workers(live: list[dict], grace_seconds: int = 30) -> lis
         try:
             state = af.load_state(worker["project"])
             task = state.get("task") or {}
-            current_cli_pid = (task.get("execution") or {}).get("cli_pid") if task.get("id") == worker.get("task_id") else None
-            cli_pid = worker.get("cli_pid") or current_cli_pid
-            if cli_pid and int(cli_pid) != int(worker["pid"]) and _pid_alive(cli_pid):
-                os.killpg(int(cli_pid), sig)
-            os.killpg(int(worker["pid"]), sig)
+            execution = (task.get("execution") or {}) if task.get("id") == worker.get("task_id") else {}
+            if not _signal_worker_groups(worker, execution, sig):
+                continue
             worker["stop_requested_at"] = requested or now.isoformat(timespec="seconds")
             actions.append({"project": worker["project"], "task_id": worker["task_id"], "signal": sig.name})
         except (OSError, ValueError):
@@ -360,10 +377,8 @@ def _stop_revoked_workers(live: list[dict], grace_seconds: int = 30) -> list[dic
                 if requested_at and now - requested_at >= timedelta(seconds=grace_seconds)
                 else signal.SIGTERM
             )
-            cli_pid = worker.get("cli_pid") or execution.get("cli_pid")
-            if cli_pid and int(cli_pid) != int(worker["pid"]) and _pid_alive(cli_pid):
-                os.killpg(int(cli_pid), sig)
-            os.killpg(int(worker["pid"]), sig)
+            if not _signal_worker_groups(worker, execution, sig):
+                continue
             worker["stop_requested_at"] = requested or now.isoformat(timespec="seconds")
             if task.get("id") == worker.get("task_id") and execution.get("dispatch_id") == worker.get("dispatch_id"):
                 execution["status"] = "stopping"
@@ -512,7 +527,10 @@ def dispatch_projects(projects: list[str]) -> dict:
     renewed = renew_live_leases(reaped["live"])
     stopped = _stop_open_circuit_workers(reaped["live"])
     stopped.extend(_stop_revoked_workers(reaped["live"]))
-    live = [item for item in reaped["live"] if _pid_alive(item.get("pid"))]
+    live = [
+        item for item in reaped["live"]
+        if _pid_alive(item.get("pid")) or _pid_alive(item.get("cli_pid"))
+    ]
     counts = {driver: sum(1 for item in live if item.get("driver") == driver) for driver in health.DRIVERS}
     outcomes = []
     for project in dict.fromkeys(projects):

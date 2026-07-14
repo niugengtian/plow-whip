@@ -112,6 +112,23 @@ class StrictUnattendedTest(unittest.TestCase):
         self.assertFalse(blocked["claimed"])
         self.assertTrue(claimed["claimed"])
 
+    def test_dead_wrapper_does_not_reap_or_replace_live_cli(self):
+        worker = {
+            "project": "P", "task_id": "T-001", "dispatch_id": "DP-split",
+            "pid": 700, "cli_pid": 701,
+        }
+        with patch.object(supervisor, "_load_registry", return_value={"workers": [worker]}), \
+                patch.object(supervisor, "_save_registry"), \
+                patch.object(supervisor, "_pid_alive", side_effect=lambda pid: int(pid or 0) == 701):
+            reaped = supervisor.reap_workers()
+        self.assertEqual(reaped["live"], [worker])
+        self.assertEqual(reaped["finished"], [])
+
+        with patch.object(supervisor, "_pid_alive", side_effect=lambda pid: int(pid or 0) == 701), \
+                patch("os.killpg") as kill:
+            self.assertTrue(supervisor._signal_worker_groups(worker, {}, signal.SIGTERM))
+        kill.assert_called_once_with(701, signal.SIGTERM)
+
     def test_startup_and_recovery_budgets_are_bounded_english_json(self):
         state = af.load_state("P")
         state["task"]["next_action"] = "continue " * 1000
