@@ -2517,6 +2517,8 @@ def _human_control_action(args) -> str | None:
         return "decision.answer"
     if command == "automation" and action in ("enable", "disable"):
         return f"automation.{action}"
+    if command == "doctor" and getattr(args, "repair", False):
+        return "repair"
     if command in ("reset", "archive", "repair", "init", "new"):
         return command
     if command == "goal" and action == "start":
@@ -2526,12 +2528,30 @@ def _human_control_action(args) -> str | None:
 
 def _require_machine_lease(project: str, args) -> None:
     operation = _machine_write_action(args)
+    control = _human_control_action(args)
+    command = getattr(args, "command", None)
+
+    # Bootstrap and read-only commands must work before a protocol exists.
+    if command in ("init", "new"):
+        return
+    if command in ("repair", "doctor") and not os.path.exists(protocol_file(project)):
+        return
+    if not operation and not control:
+        return
+
     data = load_protocol(project)
     if not leases.is_strict(data):
         return
-    control = _human_control_action(args)
-    if control and os.environ.get(leases.TOKEN_ENV):
-        raise leases.LeaseDenied(f"worker lease cannot authorize human control operation {control}")
+    if control:
+        if os.environ.get(leases.TOKEN_ENV):
+            raise leases.LeaseDenied(f"worker lease cannot authorize human control operation {control}")
+        from . import codex_desktop
+
+        if not codex_desktop.authorize_control(project, bind_if_missing=True):
+            raise leases.LeaseDenied(
+                f"human control operation {control} requires the current bound Codex Desktop session"
+            )
+        return
     if not operation:
         return
     if operation in ("task.start", "drive"):

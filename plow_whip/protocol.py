@@ -482,6 +482,7 @@ def render_handbook(data: dict) -> str:
         "",
         "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
         "- Codex Desktop 与默认 Cursor Desktop 都是 `schedulable=false` 的控制面和人工入口；只能提交、查看、确认或答复决策，不拥有 Task。",
+        "- 严格项目的控制命令必须由当前绑定的 Codex Desktop thread 授权；Worker 不继承 Desktop origin/thread，清除租约变量也不能变成人工控制面。切换控制会话必须显式执行 Desktop 同步。",
         "- Desktop 同步仅在 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` 时注册 `CODEX_THREAD_ID`，仅保存 user 与 assistant commentary/final_answer（兼容 final）文本；system、developer、reasoning、tool 与其他内容不会写入项目，公开状态只记录不可逆 thread_ref。",
         "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",
         "- Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。",

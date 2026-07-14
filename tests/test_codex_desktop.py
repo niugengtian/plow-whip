@@ -155,6 +155,27 @@ class CodexDesktopTest(unittest.TestCase):
         self.assertNotIn("cli poison", text)
         self.assertNotIn(cli_thread_id, json.dumps(result))
 
+    def test_only_bound_desktop_thread_authorizes_human_control(self):
+        self._append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "bind control"}]})
+        desktop_env = {
+            "CODEX_HOME": str(self.codex_home),
+            "CODEX_THREAD_ID": self.thread_id,
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
+        }
+        with patch.dict(os.environ, desktop_env, clear=True):
+            self.assertTrue(codex_desktop.authorize_control("P", bind_if_missing=True))
+            self.assertTrue(codex_desktop.authorize_control("P"))
+        with patch.dict(os.environ, {
+            **desktop_env,
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex CLI",
+        }, clear=True):
+            self.assertFalse(codex_desktop.authorize_control("P"))
+        with patch.dict(os.environ, {
+            **desktop_env,
+            "CODEX_THREAD_ID": "different-desktop-thread",
+        }, clear=True):
+            self.assertFalse(codex_desktop.authorize_control("P"))
+
     def test_control_plane_cannot_dispatch(self):
         result = dispatch("codex", "P", "work")
         self.assertEqual(result["status"], "rejected_control_plane")

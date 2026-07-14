@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from datetime import datetime
@@ -49,6 +50,26 @@ def _load_checkpoint(project: str) -> dict:
         return json.loads(_checkpoint_path(project).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def authorize_control(project: str, *, bind_if_missing: bool = False) -> bool:
+    """Authenticate the current Codex Desktop thread as the human control plane.
+
+    Worker processes do not inherit either Desktop identity variable.  The raw
+    thread ID is kept in the user-level checkpoint; project state exposes only
+    its irreversible reference.
+    """
+    thread_id = _environment_thread_id(allow_env=True)
+    if not thread_id:
+        return False
+    checkpoint = _load_checkpoint(project)
+    bound = checkpoint.get("thread_id")
+    if bound:
+        return hmac.compare_digest(str(bound), thread_id)
+    if not bind_if_missing:
+        return False
+    result = sync(project, allow_env=True)
+    return hmac.compare_digest(str(result.get("thread_ref") or ""), str(thread_ref(thread_id)))
 
 
 def _thread_file(thread_id: str) -> Path | None:

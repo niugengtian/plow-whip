@@ -144,9 +144,30 @@ class ProtocolSchedulerTest(unittest.TestCase):
     def test_unleased_machine_write_is_denied_but_human_confirmation_is_allowed(self):
         with self.assertRaisesRegex(leases.LeaseDenied, "observer-only"):
             af._require_machine_lease("P", FakeArgs(command="task", action="complete"))
-        af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
+        with patch("plow_whip.codex_desktop.authorize_control", return_value=True):
+            af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
         with self.assertRaisesRegex(leases.LeaseDenied, "not an execution entry"):
             af._require_machine_lease("P", FakeArgs(command="task", action="start"))
+
+    def test_worker_cannot_unset_lease_to_approve_its_own_plan(self):
+        with patch.dict(os.environ, {
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex CLI",
+            "CODEX_THREAD_ID": "worker-thread",
+        }, clear=True):
+            with self.assertRaisesRegex(leases.LeaseDenied, "current bound Codex Desktop"):
+                af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
+
+    def test_bootstrap_and_doctor_do_not_require_a_protocol(self):
+        af._require_machine_lease("Fresh", FakeArgs(command="init", action=None))
+        af._require_machine_lease("Fresh", FakeArgs(command="new", action=None))
+        af._require_machine_lease("Fresh", FakeArgs(command="repair", action=None))
+        af._require_machine_lease("Fresh", FakeArgs(command="doctor", action=None))
+        af._require_machine_lease("Fresh", FakeArgs(command="doctor", action=None, repair=True))
+
+    def test_doctor_repair_requires_human_control_for_strict_project(self):
+        with patch.dict(os.environ, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex CLI"}, clear=True):
+            with self.assertRaisesRegex(leases.LeaseDenied, "current bound Codex Desktop"):
+                af._require_machine_lease("P", FakeArgs(command="doctor", action=None, repair=True))
 
     def test_revoked_lease_cannot_be_replayed(self):
         state = af.load_state("P")

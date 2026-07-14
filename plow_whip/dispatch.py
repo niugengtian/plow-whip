@@ -390,6 +390,7 @@ def _retryable_cli_failure(result: dict) -> bool:
 def _candidate_env(agent: str, candidate: dict, extra_env: dict | None = None) -> dict:
     env = os.environ.copy()
     env.pop("CODEX_THREAD_ID", None)
+    env.pop("PLOW_WHIP_CONTROL_TOKEN", None)
     env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "Codex CLI" if agent == "codex_cli" else "Cursor CLI"
     key_name = "CODEX_API_KEY" if agent == "codex_cli" else "CURSOR_API_KEY"
     if candidate.get("secret"):

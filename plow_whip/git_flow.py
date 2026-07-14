@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -27,13 +28,30 @@ def is_repository(project_path: str) -> bool:
 
 def _branch_name(task_id: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", task_id.lower()).strip("-") or "task"
-    return f"plow/{slug}"[:120].rstrip("-")
+    digest = hashlib.sha256(task_id.encode()).hexdigest()[:10]
+    return f"plow/{slug[:100].rstrip('-')}-{digest}"
+
+
+def _path_component(value: str, fallback: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or fallback
+    digest = hashlib.sha256(value.encode()).hexdigest()[:12]
+    return f"{slug[:64].rstrip('-')}-{digest}"
 
 
 def workspace_path(config_dir: str, project: str, task_id: str) -> str:
-    project_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", project).strip("-") or "project"
-    task_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", task_id).strip("-") or "task"
+    project_slug = _path_component(project, "project")
+    task_slug = _path_component(task_id, "task")
     return os.path.join(config_dir, "worktrees", project_slug, task_slug)
+
+
+def _common_git_dir(path: str) -> str | None:
+    result = _run(path, "rev-parse", "--git-common-dir", check=False)
+    if result.returncode:
+        return None
+    common = result.stdout.strip()
+    if not os.path.isabs(common):
+        common = os.path.join(path, common)
+    return os.path.realpath(common)
 
 
 def prepare_workspace(
@@ -53,6 +71,8 @@ def prepare_workspace(
     remote_ref = f"origin/{target_branch}"
     base = _run(project_path, "rev-parse", remote_ref).stdout.strip()
     if os.path.isdir(workspace):
+        if _common_git_dir(workspace) != _common_git_dir(project_path):
+            raise GitFlowBlocked("task workspace belongs to another repository")
         current = _run(workspace, "branch", "--show-current", check=False).stdout.strip()
         if current != branch:
             raise GitFlowBlocked(f"task workspace expected branch {branch}, found {current or '(invalid)'}")

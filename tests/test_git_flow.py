@@ -59,7 +59,7 @@ class GitFlowTest(unittest.TestCase):
         workspace = os.path.join(self.tmp, "worktrees", "T-300")
         state = git_flow.prepare_workspace(self.repo, workspace, "T-300", "main")
         self.assertEqual(run(self.repo, "branch", "--show-current"), "main")
-        self.assertEqual(run(workspace, "branch", "--show-current"), "plow/t-300")
+        self.assertEqual(run(workspace, "branch", "--show-current"), state["branch"])
         self.assertEqual(run(workspace, "config", "--worktree", "--get", "remote.origin.pushurl"), "disabled://plow-whip-worker")
         with open(os.path.join(workspace, "app.txt"), "w", encoding="utf-8") as file:
             file.write("strict task\n")
@@ -71,11 +71,30 @@ class GitFlowTest(unittest.TestCase):
         self.assertFalse(delivered["merged"])
         remote_main = run(self.repo, "ls-remote", "origin", "refs/heads/main").split()[0]
         self.assertNotEqual(remote_main, commit)
-        remote_task = run(self.repo, "ls-remote", "origin", "refs/heads/plow/t-300").split()[0]
+        remote_task = run(self.repo, "ls-remote", "origin", f"refs/heads/{state['branch']}").split()[0]
         self.assertEqual(remote_task, commit)
         run(self.repo, "merge", "--ff-only", commit)
         run(self.repo, "push", "origin", "main")
         self.assertTrue(git_flow.remote_contains(self.repo, "main", commit))
+
+    def test_workspace_and_branch_names_resist_slug_collisions(self):
+        self.assertNotEqual(
+            git_flow.workspace_path(self.tmp, "a b", "T-1"),
+            git_flow.workspace_path(self.tmp, "a-b", "T-1"),
+        )
+        self.assertNotEqual(
+            git_flow.workspace_path(self.tmp, "项目甲", "T 1"),
+            git_flow.workspace_path(self.tmp, "项目乙", "T-1"),
+        )
+        self.assertNotEqual(git_flow._branch_name("T 1"), git_flow._branch_name("T-1"))
+
+    def test_existing_workspace_must_belong_to_the_same_repository(self):
+        workspace = os.path.join(self.tmp, "worktrees", "collision")
+        git_flow.prepare_workspace(self.repo, workspace, "T-collision", "main")
+        other = os.path.join(self.tmp, "other-repo")
+        run(self.tmp, "clone", "-q", "-b", "main", self.remote, other)
+        with self.assertRaisesRegex(git_flow.GitFlowBlocked, "another repository"):
+            git_flow.prepare_workspace(other, workspace, "T-collision", "main")
 
 
 if __name__ == "__main__":

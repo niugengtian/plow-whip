@@ -125,6 +125,8 @@ plow-whip --project MyProject plan confirm
 
 计划未确认时状态为 `blocked_waiting_human`，scheduler 不会执行。确认后恢复无人值守。旧的 `task start` 和 `goal` 命令仍保留兼容。
 
+严格项目的 `submit`、计划确认、决策答复、自动化开关等控制命令必须来自当前绑定的 Codex Desktop 会话。项目只公开不可逆 `thread_ref`；CLI Worker 不继承 Desktop 的 origin 与 thread ID，即使主动清除 Worker 租约变量也不能把自己伪装成人工确认。首次控制动作会绑定当前 Desktop 会话；需要换会话时先显式执行 `desktop sync`。
+
 ### 4. Worker 回写进度并完成验收
 
 以下命令只供 scheduler 签发租约后启动的 Worker 使用。Codex Desktop 或其他无租约会话执行 `start` 时会得到 `authorization.mode=observer`，启动包不会包含 `writeback`：
@@ -217,7 +219,7 @@ plow-whip scheduler status
 
 ### Git 交付原子性
 
-严格代码任务从目标分支创建 `plow/<task-id>`，并在本机配置目录建立独立 linked worktree；控制 checkout 不再切换任务分支。实现结束先提交候选 SHA，Reviewer 只能验收该 SHA；Reviewer 改动文件或 HEAD 变化会触发完整性阻塞。
+严格代码任务从目标分支创建带原始 Task ID 摘要的 `plow/<task-id>-<digest>`，并在本机配置目录建立带项目和 Task 摘要的独立 linked worktree；路径规范化碰撞或工作树属于另一仓库时直接阻塞，控制 checkout 不再切换任务分支。实现结束先提交候选 SHA，Reviewer 只能验收该 SHA；Reviewer 改动文件或 HEAD 变化会触发完整性阻塞。
 
 发布进程先推送任务分支。仅当 `orchestration.auto_merge_protected=true` 且远端允许受保护发布身份时，才尝试 fast-forward 目标分支；否则进入 `awaiting_human_merge`。人工合并后 scheduler 自动验证 `origin/<target>` 包含准确 SHA 并标记 `delivered`，系统绝不自动 rebase。
 
