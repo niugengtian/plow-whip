@@ -235,6 +235,12 @@ def quarantine_control_checkout(project: str, state: dict) -> dict | None:
     protocol = af.load_protocol(project)
     if not leases.is_strict(protocol):
         return None
+    workflow = state.get("workflow") or {}
+    if workflow.get("status") == "awaiting_human_merge":
+        # This state explicitly delegates the control checkout to a human. A
+        # conflicted merge may leave tracked changes until it is resolved and
+        # pushed; preserve the delivery state so reconciliation can resume.
+        return None
     changed = git_flow.unexpected_control_changes(af.project_dir(project))
     if not changed:
         return None
@@ -244,7 +250,6 @@ def quarantine_control_checkout(project: str, state: dict) -> dict | None:
         "status": "blocked_waiting_human", "next_action": "Inspect unauthorized control-checkout changes",
         "blockers": ["unauthorized_control_changes", *changed[:5]],
     })
-    workflow = state.get("workflow") or {}
     if workflow:
         workflow["status"] = "blocked_waiting_human"
         state["workflow"] = workflow

@@ -1344,7 +1344,7 @@ def cmd_init(project, args=None):
 
     # Canonical machine protocol + derived human handbook.
     data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
-    leases.pin_protocol(CONFIG_DIR, project, data)
+    leases.pin_protocol(CONFIG_DIR, project, data, new_incarnation=True)
     proto.write_handbook(project_dir(project))
     _write_compat_conventions(project)
     write_agent_manifest(project)
@@ -2518,6 +2518,12 @@ def _human_control_action(args) -> str | None:
     action = getattr(args, "action", None)
     if command == "submit":
         return "submit"
+    if command == "agent" and action == "set":
+        return "agent.set"
+    if command == "desktop" and action == "sync":
+        return "desktop.sync"
+    if command == "bind-tab":
+        return "bind-tab"
     if command == "plan" and action in ("confirm", "reject"):
         return f"plan.{action}"
     if command == "decision" and action == "answer":
@@ -2527,6 +2533,8 @@ def _human_control_action(args) -> str | None:
     if command == "doctor" and getattr(args, "repair", False):
         return "repair"
     if command in ("reset", "archive", "repair", "init", "new"):
+        return command
+    if command in ("rotate", "memory-rotate"):
         return command
     if command == "goal" and action == "start":
         return "goal.start"
@@ -2894,7 +2902,7 @@ def main():
     if args.command == "list":
         cmd_list()
         return
-    if args.command == "agent":
+    if args.command == "agent" and not args.project:
         cmd_agent(args, project=args.project)
         return
     if args.command == "brain":
@@ -2938,16 +2946,20 @@ def main():
     except leases.LeaseDenied as exc:
         leases.audit(
             CONFIG_DIR, project, "lease_denied",
-            operation=_machine_write_action(args), detail=str(exc),
+            operation=_machine_write_action(args) or _human_control_action(args), detail=str(exc),
         )
         print(json.dumps({
             "success": False,
             "status": "lease_denied",
             "project": project,
-            "operation": _machine_write_action(args),
+            "operation": _machine_write_action(args) or _human_control_action(args),
             "detail": str(exc),
         }, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(3)
+
+    if args.command == "agent":
+        cmd_agent(args, project=project)
+        return
 
     if args.command == "bind-tab":
         cmd_bind_tab(project, args.tab, args.name)

@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -150,6 +151,22 @@ class ProtocolSchedulerTest(unittest.TestCase):
         with self.assertRaisesRegex(leases.LeaseDenied, "not an execution entry"):
             af._require_machine_lease("P", FakeArgs(command="task", action="start"))
 
+    def test_project_agent_set_passes_through_human_control_gate(self):
+        before = af.load_protocol("P")["agents"]["builder"]["driver"]
+        argv = [
+            "plow-whip", "--project", "P", "agent", "set", "builder",
+            "--driver", "codex_cli",
+        ]
+        with patch.object(sys, "argv", argv), \
+             patch("plow_whip.codex_desktop.authorize_control", return_value=False), \
+             self.assertRaisesRegex(SystemExit, "3"):
+            af.main()
+        self.assertEqual(af.load_protocol("P")["agents"]["builder"]["driver"], before)
+        with patch.object(sys, "argv", argv), \
+             patch("plow_whip.codex_desktop.authorize_control", return_value=True):
+            af.main()
+        self.assertEqual(af.load_protocol("P")["agents"]["builder"]["driver"], "codex_cli")
+
     def test_worker_cannot_unset_lease_to_approve_its_own_plan(self):
         with patch.dict(os.environ, {
             "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex CLI",
@@ -229,6 +246,26 @@ class ProtocolSchedulerTest(unittest.TestCase):
         with self.assertRaises(leases.ProtocolIntegrityError):
             af.load_state("P")
         self.assertIn("authority", af.build_doctor_report("P")["issues"][0])
+
+    def test_legacy_authority_pin_is_migrated_without_losing_enforcement(self):
+        data = af.load_protocol("P")
+        current = leases._protocol_pin_path(af.CONFIG_DIR, "P", leases.protocol_epoch(data))
+        legacy = leases._legacy_protocol_pin_path(af.CONFIG_DIR, "P")
+        os.replace(current, legacy)
+
+        self.assertEqual(af.load_protocol("P")["enforcement"]["mode"], "strict")
+        self.assertTrue(os.path.exists(current))
+
+    def test_archived_project_name_can_start_a_new_incarnation(self):
+        old_epoch = leases.protocol_epoch(af.load_protocol("P"))
+        state = af.load_state("P")
+        state["task"]["status"] = "done"
+        af.save_state("P", state)
+        af.cmd_archive("P")
+
+        af.cmd_init("P")
+
+        self.assertNotEqual(leases.protocol_epoch(af.load_protocol("P")), old_epoch)
 
     def test_start_pack_clamps_unbounded_task_fields(self):
         state = af.load_state("P")
@@ -346,7 +383,8 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def _save_git_delivery_blocker(self):
         data = af.load_protocol("P")
-        os.unlink(leases._protocol_pin_path(af.CONFIG_DIR, "P"))
+        os.unlink(leases._protocol_pin_path(af.CONFIG_DIR, "P", leases.protocol_epoch(data)))
+        os.unlink(leases._legacy_protocol_pin_path(af.CONFIG_DIR, "P"))
         data.pop("enforcement", None)
         protocol.save(af.project_dir("P"), data)
         state = af.load_state("P")

@@ -170,6 +170,23 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(result["status"], "delivered")
         self.assertEqual(af.load_state("P0")["workflow"]["status"], "done")
 
+    def test_human_merge_conflict_remains_reconcilable(self):
+        state = af.load_state("P0")
+        state["task"].update({"placeholder": False, "status": "awaiting_human_merge"})
+        state["workflow"] = {
+            "id": "T-conflict", "status": "awaiting_human_merge", "target_branch": "main",
+            "candidate_commit": "abc123", "delivery": {
+                "status": "awaiting_human_merge", "commit": "abc123", "target_branch": "main",
+            },
+        }
+        af.save_state("P0", state)
+        with patch("plow_whip.supervisor.git_flow.unexpected_control_changes", return_value=["app.py"]):
+            self.assertIsNone(supervisor.quarantine_control_checkout("P0", af.load_state("P0")))
+        self.assertEqual(af.load_state("P0")["workflow"]["status"], "awaiting_human_merge")
+        with patch("plow_whip.supervisor.git_flow.remote_contains", return_value=True):
+            result = supervisor.reconcile_delivery("P0", af.load_state("P0"))
+        self.assertEqual(result["status"], "delivered")
+
 
 if __name__ == "__main__":
     unittest.main()

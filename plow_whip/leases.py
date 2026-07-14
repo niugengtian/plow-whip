@@ -50,7 +50,13 @@ def _secret_path(config_dir: str) -> str:
     return os.path.join(_runtime_dir(config_dir), "lease-secret")
 
 
-def _protocol_pin_path(config_dir: str, project: str) -> str:
+def _protocol_pin_path(config_dir: str, project: str, epoch: str = "") -> str:
+    """Key pins by project incarnation so an archived name can be reused."""
+    digest = hashlib.sha256(f"{project}\0{epoch}".encode()).hexdigest()
+    return os.path.join(_runtime_dir(config_dir), "protocols", f"{digest}.json")
+
+
+def _legacy_protocol_pin_path(config_dir: str, project: str) -> str:
     digest = hashlib.sha256(project.encode()).hexdigest()
     return os.path.join(_runtime_dir(config_dir), "protocols", f"{digest}.json")
 
@@ -109,42 +115,36 @@ def _protocol_pin_payload(project: str, protocol: dict) -> dict:
     }
 
 
-def pin_protocol(config_dir: str, project: str, protocol: dict) -> None:
-    """Persist a local authority pin before a strict project can execute."""
-    if not is_strict(protocol):
-        return
-    path = _protocol_pin_path(config_dir, project)
-    if os.path.exists(path):
-        verify_protocol(config_dir, project, protocol)
-        return
-    payload = _protocol_pin_payload(project, protocol)
-    if not payload["protocol_epoch"]:
-        raise ProtocolIntegrityError("strict protocol cannot be pinned without protocol_epoch")
-    record = {
-        **payload,
-        "signature": hmac.new(_secret(config_dir), _canonical(payload), hashlib.sha256).hexdigest(),
-    }
+def _write_protocol_pin(path: str, record: dict) -> bool:
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        verify_protocol(config_dir, project, protocol)
-        return
+        return False
     try:
         os.write(fd, encoded)
         os.fsync(fd)
     finally:
         os.close(fd)
+    return True
 
 
-def verify_protocol(config_dir: str, project: str, protocol: dict) -> None:
-    """Reject strict-mode downgrade or epoch replacement using a project-external pin."""
-    path = _protocol_pin_path(config_dir, project)
-    if not os.path.exists(path):
-        if is_strict(protocol):
-            raise ProtocolIntegrityError("strict AGENT_PROTOCOL.json has no local authority pin")
-        return
+def _replace_protocol_pin(path: str, record: dict) -> None:
+    """Atomically point the project-name index at its current incarnation."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    temporary = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, encoded)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, path)
+
+
+def _validated_protocol_pin(config_dir: str, project: str, protocol: dict, path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as handle:
             record = json.load(handle)
@@ -154,9 +154,60 @@ def verify_protocol(config_dir: str, project: str, protocol: dict) -> None:
     expected = hmac.new(_secret(config_dir), _canonical(payload), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(str(record.get("signature", "")), expected):
         raise ProtocolIntegrityError("local protocol authority pin signature is invalid")
-    actual = _protocol_pin_payload(project, protocol)
-    if payload != actual:
+    if payload != _protocol_pin_payload(project, protocol):
         raise ProtocolIntegrityError("AGENT_PROTOCOL.json enforcement changed outside the authority")
+    return record
+
+
+def pin_protocol(
+    config_dir: str,
+    project: str,
+    protocol: dict,
+    *,
+    new_incarnation: bool = False,
+) -> None:
+    """Persist a local authority pin before a strict project can execute."""
+    if not is_strict(protocol):
+        return
+    path = _protocol_pin_path(config_dir, project, protocol_epoch(protocol))
+    if os.path.exists(path):
+        verify_protocol(config_dir, project, protocol)
+        if new_incarnation:
+            record = _validated_protocol_pin(config_dir, project, protocol, path)
+            _replace_protocol_pin(_legacy_protocol_pin_path(config_dir, project), record)
+        return
+    legacy_path = _legacy_protocol_pin_path(config_dir, project)
+    if os.path.exists(legacy_path) and not new_incarnation:
+        verify_protocol(config_dir, project, protocol)
+        return
+    payload = _protocol_pin_payload(project, protocol)
+    if not payload["protocol_epoch"]:
+        raise ProtocolIntegrityError("strict protocol cannot be pinned without protocol_epoch")
+    record = {
+        **payload,
+        "signature": hmac.new(_secret(config_dir), _canonical(payload), hashlib.sha256).hexdigest(),
+    }
+    if not _write_protocol_pin(path, record):
+        verify_protocol(config_dir, project, protocol)
+        record = _validated_protocol_pin(config_dir, project, protocol, path)
+    if new_incarnation or not os.path.exists(legacy_path):
+        _replace_protocol_pin(legacy_path, record)
+
+
+def verify_protocol(config_dir: str, project: str, protocol: dict) -> None:
+    """Reject strict-mode downgrade or epoch replacement using a project-external pin."""
+    path = _protocol_pin_path(config_dir, project, protocol_epoch(protocol))
+    if not os.path.exists(path):
+        legacy_path = _legacy_protocol_pin_path(config_dir, project)
+        if os.path.exists(legacy_path):
+            record = _validated_protocol_pin(config_dir, project, protocol, legacy_path)
+            if not _write_protocol_pin(path, record):
+                _validated_protocol_pin(config_dir, project, protocol, path)
+            return
+        if not is_strict(protocol):
+            return
+        raise ProtocolIntegrityError("strict AGENT_PROTOCOL.json has no local authority pin")
+    _validated_protocol_pin(config_dir, project, protocol, path)
 
 
 def audit(config_dir: str, project: str, event: str, **details) -> None:
