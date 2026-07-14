@@ -55,6 +55,28 @@ class GitFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(git_flow.GitFlowBlocked, "cannot fast-forward"):
             git_flow.finalize_fast_forward(self.repo, "T-200", state)
 
+    def test_strict_workspace_cannot_push_and_publisher_only_pushes_task_branch(self):
+        workspace = os.path.join(self.tmp, "worktrees", "T-300")
+        state = git_flow.prepare_workspace(self.repo, workspace, "T-300", "main")
+        self.assertEqual(run(self.repo, "branch", "--show-current"), "main")
+        self.assertEqual(run(workspace, "branch", "--show-current"), "plow/t-300")
+        self.assertEqual(run(workspace, "config", "--worktree", "--get", "remote.origin.pushurl"), "disabled://plow-whip-worker")
+        with open(os.path.join(workspace, "app.txt"), "w", encoding="utf-8") as file:
+            file.write("strict task\n")
+        commit = git_flow.checkpoint_branch(workspace, "T-300", state)
+        delivered = git_flow.publish_reviewed(
+            workspace, "T-300", state, commit, auto_merge=False, publisher_path=self.repo,
+        )
+        self.assertEqual(delivered["status"], "awaiting_human_merge")
+        self.assertFalse(delivered["merged"])
+        remote_main = run(self.repo, "ls-remote", "origin", "refs/heads/main").split()[0]
+        self.assertNotEqual(remote_main, commit)
+        remote_task = run(self.repo, "ls-remote", "origin", "refs/heads/plow/t-300").split()[0]
+        self.assertEqual(remote_task, commit)
+        run(self.repo, "merge", "--ff-only", commit)
+        run(self.repo, "push", "origin", "main")
+        self.assertTrue(git_flow.remote_contains(self.repo, "main", commit))
+
 
 if __name__ == "__main__":
     unittest.main()

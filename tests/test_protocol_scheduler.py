@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import plow_whip.agent_flow as af
-from plow_whip import git_flow, protocol, routing, scheduler
+from plow_whip import git_flow, leases, protocol, routing, scheduler, supervisor
 from plow_whip.whip import run_once
 
 
@@ -108,6 +108,9 @@ class ProtocolSchedulerTest(unittest.TestCase):
     def test_start_pack_is_bounded_and_complete(self):
         pack = af.build_start_pack("P", "codex")
         self.assertTrue(pack["ready"])
+        self.assertEqual(pack["authorization"]["mode"], "observer")
+        self.assertFalse(pack["authorization"]["execution_allowed"])
+        self.assertNotIn("writeback", pack)
         self.assertEqual(pack["task"]["id"], "T-001")
         self.assertIn("R001", [r["id"] for r in pack["mandatory_rules"]])
         self.assertNotIn("R006", [r["id"] for r in pack["important_rules"]])
@@ -121,6 +124,56 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertNotIn("next_action_file_excerpt", pack)
         self.assertNotIn("rules", pack)
         self.assertLessEqual(pack["rules_meta"]["startup_payload_chars"], af.START_PACK_MAX_CHARS)
+
+    def test_scheduler_lease_turns_exact_owner_into_worker(self):
+        state = af.load_state("P")
+        state["task"]["placeholder"] = False
+        af.save_state("P", state)
+        claim = supervisor.claim_task("P", "T-001", "DP-test", "codex_cli", "codex_cli")
+        self.assertTrue(claim["claimed"])
+        self.assertNotIn(claim["lease_token"], json.dumps(af.load_state("P"), ensure_ascii=False))
+        with patch.dict(os.environ, {leases.TOKEN_ENV: claim["lease_token"]}):
+            pack = af.build_start_pack("P", "codex_cli")
+            self.assertEqual(pack["authorization"]["mode"], "worker")
+            self.assertTrue(pack["authorization"]["execution_allowed"])
+            self.assertIn("writeback", pack)
+            af._require_machine_lease("P", FakeArgs(command="task", action="progress"))
+            with self.assertRaisesRegex(leases.LeaseDenied, "human control"):
+                af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
+
+    def test_unleased_machine_write_is_denied_but_human_confirmation_is_allowed(self):
+        with self.assertRaisesRegex(leases.LeaseDenied, "observer-only"):
+            af._require_machine_lease("P", FakeArgs(command="task", action="complete"))
+        af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
+        with self.assertRaisesRegex(leases.LeaseDenied, "not an execution entry"):
+            af._require_machine_lease("P", FakeArgs(command="task", action="start"))
+
+    def test_revoked_lease_cannot_be_replayed(self):
+        state = af.load_state("P")
+        state["task"]["placeholder"] = False
+        af.save_state("P", state)
+        first = supervisor.claim_task("P", "T-001", "DP-one", "codex_cli", "codex_cli")
+        state = af.load_state("P")
+        leases.revoke(state["task"], "test handoff")
+        af.save_state("P", state)
+        second = supervisor.claim_task("P", "T-001", "DP-two", "codex_cli", "codex_cli")
+        self.assertTrue(second["claimed"])
+        with self.assertRaisesRegex(leases.LeaseDenied, "does not match|no longer active"):
+            leases.validate(
+                af.CONFIG_DIR, "P", af.load_state("P"), af.load_protocol("P"),
+                token=first["lease_token"], agent="codex_cli",
+            )
+
+    def test_protocol_authority_pin_rejects_strict_mode_downgrade(self):
+        data = af.load_protocol("P")
+        data.pop("enforcement")
+        protocol.save(af.project_dir("P"), data)
+
+        with self.assertRaisesRegex(leases.ProtocolIntegrityError, "enforcement changed"):
+            af.load_protocol("P")
+        with self.assertRaises(leases.ProtocolIntegrityError):
+            af.load_state("P")
+        self.assertIn("authority", af.build_doctor_report("P")["issues"][0])
 
     def test_start_pack_clamps_unbounded_task_fields(self):
         state = af.load_state("P")
@@ -237,6 +290,10 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertIn("broken", task["last_output"])
 
     def _save_git_delivery_blocker(self):
+        data = af.load_protocol("P")
+        os.unlink(leases._protocol_pin_path(af.CONFIG_DIR, "P"))
+        data.pop("enforcement", None)
+        protocol.save(af.project_dir("P"), data)
         state = af.load_state("P")
         state["workflow"] = {
             "id": "T-delivery", "status": "blocked_waiting_human", "code_change": True,

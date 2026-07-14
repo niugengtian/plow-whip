@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import secrets
 
 from .io_utils import atomic_write_json, atomic_write_text
 
@@ -24,7 +25,7 @@ DEFAULT_ROLES = {
 DEFAULT_AGENT_ROUTING = {
     "codex": {"roles": ["control-plane"], "capabilities": ["human-interaction"], "driver": "control", "priority": 60, "schedulable": False},
     "codex_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "codex_cli", "priority": 50},
-    "cursor": {"roles": ["implementation", "reviewer"], "capabilities": ["*"], "driver": "zellij"},
+    "cursor": {"roles": ["control-plane"], "capabilities": ["human-interaction"], "driver": "control", "schedulable": False},
     "cursor_cli": {"roles": ["planner", "implementation", "reviewer"], "capabilities": ["*"], "driver": "cursor_cli", "priority": 70, "cost_tier": "low"},
     "reviewer": {"roles": ["reviewer"], "capabilities": ["review"], "driver": "file"},
     "simple-tasker": {
@@ -43,6 +44,8 @@ DEFAULT_ORCHESTRATION = {
     "max_concurrency_per_driver": 5,
     "retry_limit": 3,
     "circuit_recovery_successes": 3,
+    "lease_ttl_seconds": 2400,
+    "auto_merge_protected": False,
 }
 
 
@@ -151,12 +154,18 @@ GLOBAL_RULES = {
         "locked": False,
         "scope": ["workflow", "verification", "automation"],
     },
+    "R010": {
+        "summary": "Strict projects require a current scheduler-issued lease for execution and machine writeback; unleased sessions are observers.",
+        "summary_zh": "严格项目只有持有 scheduler 当前租约的会话才能执行和机器回写；无租约会话只能观察。",
+        "locked": True,
+        "scope": ["startup", "workflow", "authorization"],
+    },
 }
 
-REQUIRED_GLOBAL_RULES = {"R001", "R002", "R003", "R004", "R005", "R009"}
+REQUIRED_GLOBAL_RULES = {"R001", "R002", "R003", "R004", "R005", "R009", "R010"}
 RULE_ENFORCEMENT = {
     "R001": "block", "R002": "block", "R003": "require_approval",
-    "R004": "require_approval", "R005": "block", "R009": "verify",
+    "R004": "require_approval", "R005": "block", "R009": "verify", "R010": "block",
 }
 
 
@@ -241,6 +250,11 @@ def default_protocol(project: str, agents: list[str], agent_meta: dict | None = 
     return {
         "schema_version": 4,
         "project": project,
+        "enforcement": {
+            "mode": "strict",
+            "protocol_epoch": secrets.token_hex(16),
+            "control_plane": "codex",
+        },
         "global_rules": {rule_id: normalize_rule(rule_id, rule, "global") for rule_id, rule in GLOBAL_RULES.items()},
         "project_rules": {},
         "agents": {
@@ -368,11 +382,15 @@ def semantic_issues(data: dict) -> list[str]:
     missing_defaults = [key for key in DEFAULT_ORCHESTRATION if key not in data.get("orchestration", {})]
     if missing_defaults:
         issues.append("protocol defaults missing: orchestration." + ", orchestration.".join(missing_defaults))
+    enforcement = data.get("enforcement")
+    if enforcement and enforcement.get("mode") == "strict" and not enforcement.get("protocol_epoch"):
+        issues.append("strict enforcement is missing protocol_epoch")
     return issues
 
 
 def render_handbook(data: dict) -> str:
     orchestration = {**DEFAULT_ORCHESTRATION, **data.get("orchestration", {})}
+    enforcement = data.get("enforcement") or {"mode": "legacy"}
     lines = [
         "# 多 Agent 协作手册",
         "",
@@ -398,18 +416,22 @@ def render_handbook(data: dict) -> str:
         "## 入口与状态迁移",
         "",
         "- 人或外部工具通过 `submit` 投递任务；Agent 每次开始或恢复工作前通过 `start --agent ... --json` 获取有界上下文。",
+        f"- 当前授权模式为 `{enforcement.get('mode', 'legacy')}`；严格模式下，无 scheduler 租约的会话只能获得 observer 启动包。",
         "- 系统定时任务只运行带锁的 `whip --once`；模型仅在存在可恢复的超时 active Task 时由 Worker 调用。",
-        "- Agent 只能使用 `submit`、`task`、`handoff`、`plan`、`review`、`goal`、`automation` 等命令推进状态，框架内部通过 revision 与原子写维护 `AGENT_STATE.json`。",
+        "- 机器回写必须同时通过租约、Owner、Task、dispatch、代数、有效期和 protocol epoch 校验；人工确认命令拒绝 Worker 租约。",
+        "- `AGENT_STATE.json` 通过 revision、原子写和本地 authority 签名维护；项目外 authority pin 固定 strict 模式与 protocol epoch，状态或协议降级篡改都不会被加载或 repair 静默接受。",
         "- 临时嵌套子智能体受 R004 限制；Registry 中已注册 Agent 之间的 Planner、实现、Reviewer、故障接力属于 plow-whip 编排。",
         "",
         "## 无人值守闭环",
         "",
         "1. 本地分类器将明确任务直接路由；复杂、模糊或无法确认的任务交给可配置 Planner。",
         "2. Planner 只提交粗粒度里程碑；计划必须由人确认，确认后才恢复无人值守。",
-        "3. 代码任务在独立任务分支执行，完成验收命令后进入独立 Reviewer。",
-        "4. Reviewer 默认使用不同 Driver；资源不足时使用同一 CLI 的不同逻辑 Agent 与全新 Session。",
-        "5. 验收通过后推送任务分支，并仅以 fast-forward 更新目标分支；无法快进时暂停等待人工处理。",
-        "6. 网络或服务故障按 Driver 独立熔断；连续探测成功达到阈值后恢复原任务与会话。",
+        "3. 代码任务在独立 Git worktree 和任务分支执行；控制 checkout 的无租约代码改动会隔离当前任务。",
+        "4. 实现完成后先提交候选 SHA；Reviewer 默认使用不同 Driver，并且验收结论绑定该准确 SHA。",
+        "5. 发布进程持有推送能力；可安全自动交付时仅 fast-forward，否则只推任务分支并等待人工合并。",
+        "6. scheduler 检测远端目标分支包含已验收 SHA 后自动标记 delivered，无需第二次人工确认。",
+        "7. 发生二选一或必然分裂时撤销当前租约，只冻结该 Task；人工答复后签发新租约续接。",
+        "8. 网络或服务故障按 Driver 独立熔断；连续探测成功达到阈值后恢复原任务与会话。",
         "",
         "## 编排默认值",
         "",
@@ -421,9 +443,11 @@ def render_handbook(data: dict) -> str:
         f"| 每种 Driver 最大并发 | {orchestration['max_concurrency_per_driver']} |",
         f"| 实现失败重试上限 | {orchestration['retry_limit']} |",
         f"| 熔断恢复连续成功次数 | {orchestration['circuit_recovery_successes']} |",
+        f"| Worker 租约时长 | {orchestration['lease_ttl_seconds']} 秒 |",
+        f"| 受保护身份自动更新目标分支 | {'是' if orchestration['auto_merge_protected'] else '否，仅推任务分支'} |",
         "| 新项目无人值守 | 默认开启 |",
         "| 计划确认 | 必须由人确认 |",
-        "| Git 交付 | 独立任务分支、独立 Reviewer、fast-forward only |",
+        "| Git 交付 | 独立 worktree、精确 SHA Reviewer、受控发布、fast-forward only |",
         "",
         "## 文件真源",
         "",
@@ -434,6 +458,8 @@ def render_handbook(data: dict) -> str:
         "| Simple-tasker 完整持久会话 | `collab/memory/sessions/<task>_simple_tasker.jsonl` |",
         "| Codex Desktop 文本镜像 | `collab/conversations/codex/current.md`（checkpoint 位于本机配置，受管环境回退到 Git 忽略的 `collab/.runtime/`） |",
         "| CLI 熔断与 Worker 进程登记 | 框架运行目录中的 `health.json`、`workers.json` |",
+        "| 租约签名密钥与授权审计 | 本机配置目录的 `runtime/authority/`、`logs/authorization.jsonl`；不进入项目 |",
+        "| 严格任务 worktree | 本机配置目录的 `worktrees/<project>/<task>/` |",
         "| 分支与远端交付结果 | Git refs 与远端仓库 |",
         "| 中文手册、Agent 阵容表、兼容 Markdown | 派生视图，不是真源 |",
     ]
@@ -455,7 +481,7 @@ def render_handbook(data: dict) -> str:
         "## 密钥与网络边界",
         "",
         "- Codex/Cursor 可使用 Desktop 登录或只保存环境变量名称的 Key Pool；真实 Key 不写入项目、状态或日志。",
-        "- Codex Desktop 是 `schedulable=false` 的控制面和人工入口；只能通过 `submit` 分配给可调度 Agent，不拥有或执行 Task。",
+        "- Codex Desktop 与默认 Cursor Desktop 都是 `schedulable=false` 的控制面和人工入口；只能提交、查看、确认或答复决策，不拥有 Task。",
         "- Desktop 同步仅在 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` 时注册 `CODEX_THREAD_ID`，仅保存 user 与 assistant commentary/final_answer（兼容 final）文本；system、developer、reasoning、tool 与其他内容不会写入项目，公开状态只记录不可逆 thread_ref。",
         "- DeepSeek Key 只从 `DEEPSEEK_API_KEY` 或编号环境变量读取；仅记录后四位与哈希组成的脱敏标识。",
         "- Simple-tasker 在项目沙箱内读写、测试并持久化本地 JSONL Session；禁止自行提交、推送、合并或越出项目。",

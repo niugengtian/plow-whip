@@ -24,6 +24,7 @@ from datetime import datetime
 
 from . import agent_flow as af
 from . import routing
+from . import leases
 from .brain import Brain, classify_complexity
 from .simple_tasker import SimpleTasker
 from .io_utils import atomic_write_json, file_lock
@@ -265,6 +266,7 @@ def _record_cli_session(project: str, agent: str, session_id: str, route: dict |
             "auth_profile": (route or {}).get("name", "desktop"),
             "model": (route or {}).get("model"),
         }
+        task.setdefault("execution", {})["session_id"] = session_id
         try:
             af.save_state(project, state)
             return sessions[agent]
@@ -385,7 +387,7 @@ def _retryable_cli_failure(result: dict) -> bool:
     return result.get("returncode") != 0 and any(marker in output for marker in markers)
 
 
-def _candidate_env(agent: str, candidate: dict) -> dict:
+def _candidate_env(agent: str, candidate: dict, extra_env: dict | None = None) -> dict:
     env = os.environ.copy()
     env.pop("CODEX_THREAD_ID", None)
     env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "Codex CLI" if agent == "codex_cli" else "Cursor CLI"
@@ -394,10 +396,14 @@ def _candidate_env(agent: str, candidate: dict) -> dict:
         env[key_name] = candidate["secret"]
     else:
         env.pop(key_name, None)
+    env.update(extra_env or {})
     return env
 
 
-def _run_cli_candidates(agent: str, build_command, cwd: str, timeout: int, on_event, on_start, active: dict) -> dict:
+def _run_cli_candidates(
+    agent: str, build_command, cwd: str, timeout: int, on_event, on_start,
+    active: dict, extra_env: dict | None = None,
+) -> dict:
     from .cli_auth import candidates
 
     routes = candidates(agent)
@@ -409,7 +415,7 @@ def _run_cli_candidates(agent: str, build_command, cwd: str, timeout: int, on_ev
         active.update(route)
         result = _run_streaming_cli(
             build_command(route), cwd, timeout, on_event, on_start,
-            env=_candidate_env(agent, route),
+            env=_candidate_env(agent, route, extra_env),
         )
         attempts.append({"profile": route["name"], "model": route.get("model"), "returncode": result["returncode"]})
         result.update({"auth_profile": route["name"], "model": route.get("model"), "attempts": attempts})
@@ -425,9 +431,11 @@ def _dispatch_cursor_cli(
     timeout: int = 300,
     agent: str | None = None,
     dispatch_id: str | None = None,
+    lease_token: str | None = None,
 ) -> dict:
     """通过 Cursor CLI 唤醒 Cursor 执行任务。"""
-    project_path = af.project_dir(project)
+    initial_state = af.load_state(project)
+    project_path = af.task_workspace(project, initial_state)
     if not os.path.isdir(project_path):
         return {"success": False, "channel": "cursor_cli", "detail": f"项目路径不存在: {project_path}"}
 
@@ -446,7 +454,6 @@ def _dispatch_cursor_cli(
     session = _existing_cli_session(project, "cursor_cli")
 
     try:
-        initial_state = af.load_state(project)
         initial_marker = _task_marker(initial_state)
         initial_task_id = (initial_state.get("task") or {}).get("id")
         captured = {"session_id": session.get("session_id") if session else None}
@@ -477,6 +484,7 @@ def _dispatch_cursor_cli(
                 update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
         result = _run_cli_candidates(
             "cursor_cli", build_command, project_path, timeout, on_event, on_start, active_route,
+            {leases.TOKEN_ENV: lease_token} if lease_token else None,
         )
         if result.get("config_error"):
             return {"success": False, "channel": "cursor_cli", "detail": result["config_error"]}
@@ -529,13 +537,15 @@ def _dispatch_codex_cli(
     timeout: int = 1800,
     agent: str | None = None,
     dispatch_id: str | None = None,
+    lease_token: str | None = None,
 ) -> dict:
     """
     通过 codex CLI Print 模式直接唤醒 Codex 执行任务。
     timeout 默认 1800 秒（30 分钟），Sprint 级任务需要足够时间。
     """
     # 获取项目路径
-    project_path = af.project_dir(project)
+    initial_state = af.load_state(project)
+    project_path = af.task_workspace(project, initial_state)
     
     if not os.path.isdir(project_path):
         return {"success": False, "channel": "codex_cli", "detail": f"项目路径不存在: {project_path}"}
@@ -564,7 +574,6 @@ def _dispatch_codex_cli(
         "exec",
     ]
     session = _existing_cli_session(project, "codex_cli")
-    initial_state = af.load_state(project)
     initial_marker = _task_marker(initial_state)
     initial_task_id = (initial_state.get("task") or {}).get("id")
     try:
@@ -599,6 +608,7 @@ def _dispatch_codex_cli(
                 update_inbox_task(agent, dispatch_id, "running", f"pid={pid}")
         result = _run_cli_candidates(
             "codex_cli", build_command, project_path, timeout, on_event, on_start, active_route,
+            {leases.TOKEN_ENV: lease_token} if lease_token else None,
         )
         if result.get("config_error"):
             return {"success": False, "channel": "codex_cli", "detail": result["config_error"]}
@@ -708,7 +718,11 @@ def _dispatch_simple_tasker(agent: str, prompt: str, project: str) -> dict:
     state = af.load_state(project)
     task = state.get("task") or {}
     task_id = task.get("id", "T-001")
-    runner = SimpleTasker(af.project_dir(project), task_id)
+    workspace = af.task_workspace(project, state)
+    runner = SimpleTasker(
+        workspace, task_id,
+        session_dir=os.path.join(af.project_memory_dir(project), "sessions"),
+    )
     context = json.dumps({
         "project": project,
         "acceptance": task.get("acceptance", []),
@@ -729,7 +743,9 @@ def _dispatch_simple_tasker(agent: str, prompt: str, project: str) -> dict:
         session.update({
             "session_id": result.get("session_id"), "status": result.get("status"),
             "created_at": session.get("created_at") or datetime.now().isoformat(timespec="seconds"),
-            "key_ref": result.get("key_ref"), "session_file": os.path.relpath(result.get("session_file", runner.session_path), af.project_dir(project)),
+            "key_ref": result.get("key_ref"), "session_file": os.path.relpath(
+                result.get("session_file", runner.session_path), af.project_dir(project)
+            ),
         })
         af.save_state(project, state)
 
@@ -860,6 +876,19 @@ def _record_execution(project: str, task_id: str | None, result: dict) -> None:
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
+@contextlib.contextmanager
+def _temporary_lease(token: str | None):
+    previous = os.environ.get(leases.TOKEN_ENV)
+    if token:
+        os.environ[leases.TOKEN_ENV] = token
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(leases.TOKEN_ENV, None)
+        else:
+            os.environ[leases.TOKEN_ENV] = previous
+
 def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, **kwargs) -> dict:
     """
     将任务投递给指定 agent。
@@ -882,6 +911,7 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
             }
     use_brain = kwargs.pop("use_brain", False)
     dispatch_id = kwargs.pop("dispatch_id", None) or f"DP-{uuid.uuid4().hex[:12]}"
+    lease_token = kwargs.pop("lease_token", None) or os.environ.get(leases.TOKEN_ENV)
     task_id = kwargs.pop("task_id", None)
     if task_id is None and os.path.exists(af.state_file(project)):
         task_id = af.load_state(project).get("task", {}).get("id", "T-001")
@@ -902,30 +932,43 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
         if ch in ("cursor_cli", "codex_cli", "simple_tasker") and task_id:
             from . import supervisor
 
-            claim = supervisor.claim_task(project, task_id, dispatch_id, ch, agent)
-            if not claim["claimed"]:
-                result = {
-                    "success": False, "channel": ch,
-                    "detail": claim.get("detail", "same task already has a live executor"),
-                    "dispatch_id": dispatch_id, "task_id": task_id, "status": "skipped_running",
-                }
+            existing = False
+            if lease_token:
                 try:
-                    update_inbox_task(agent, dispatch_id, "failed", result["detail"])
-                except KeyError:
-                    pass
-                return result
+                    payload = leases.validate(
+                        af.CONFIG_DIR, project, af.load_state(project), af.load_protocol(project),
+                        token=lease_token, agent=agent,
+                    )
+                    existing = payload.get("dispatch_id") == dispatch_id
+                except leases.LeaseDenied:
+                    existing = False
+            if not existing:
+                claim = supervisor.claim_task(project, task_id, dispatch_id, ch, agent)
+                if not claim["claimed"]:
+                    result = {
+                        "success": False, "channel": ch,
+                        "detail": claim.get("detail", "same task already has a live executor"),
+                        "dispatch_id": dispatch_id, "task_id": task_id, "status": "skipped_running",
+                    }
+                    try:
+                        update_inbox_task(agent, dispatch_id, "failed", result["detail"])
+                    except KeyError:
+                        pass
+                    return result
+                lease_token = claim.get("lease_token") or lease_token
         if ch == "brain":
             result = _dispatch_brain(agent, prompt, project)
         elif ch == "simple_tasker":
-            result = _dispatch_simple_tasker(agent, prompt, project)
+            with _temporary_lease(lease_token):
+                result = _dispatch_simple_tasker(agent, prompt, project)
         elif ch == "cursor_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 300)
-            result = _dispatch_cursor_cli(prompt, project, max_turns, timeout, agent, dispatch_id)
+            result = _dispatch_cursor_cli(prompt, project, max_turns, timeout, agent, dispatch_id, lease_token)
         elif ch == "codex_cli":
             max_turns = kwargs.get("max_turns", 20)
             timeout = kwargs.get("timeout", 1800)
-            result = _dispatch_codex_cli(prompt, project, max_turns, timeout, agent, dispatch_id)
+            result = _dispatch_codex_cli(prompt, project, max_turns, timeout, agent, dispatch_id, lease_token)
         elif ch == "zellij":
             target_tab = kwargs.get("target_tab")
             result = _dispatch_zellij(prompt, project, target_tab)

@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from . import agent_flow as af
+from . import leases
 from .dispatch import dispatch, available_channels
 
 
@@ -156,7 +157,35 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
                 "updated_at": "",
                 "stale": True,
                 "needs_recovery": True,
+                "automation_enabled": False,
+                "supervisable": False,
                 "reason": f"state_error:{type(exc).__name__}",
+            })
+            continue
+
+        try:
+            project_protocol = af.load_protocol(name)
+            leases.verify_state(af.CONFIG_DIR, name, state, project_protocol)
+        except (leases.StateIntegrityError, OSError, ValueError, json.JSONDecodeError) as exc:
+            try:
+                leases.audit(
+                    af.CONFIG_DIR, name, "state_integrity_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            except OSError:
+                pass
+            results.append({
+                "project": name,
+                "current_agent": "unknown",
+                "status": "invalid_state",
+                "task_id": "",
+                "task_status": "unknown",
+                "updated_at": state.get("updated_at", ""),
+                "stale": True,
+                "needs_recovery": True,
+                "automation_enabled": False,
+                "supervisable": False,
+                "reason": f"state_integrity_error:{type(exc).__name__}",
             })
             continue
 
@@ -164,7 +193,7 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
         status = state.get("status", "unknown")
         task_status = task.get("status", "unknown")
         try:
-            agent_meta = af.load_protocol(name).get("agents", {}).get(task.get("owner") or state.get("current_agent"), {})
+            agent_meta = project_protocol.get("agents", {}).get(task.get("owner") or state.get("current_agent"), {})
             schedulable = agent_meta.get("schedulable", True)
         except (OSError, ValueError, json.JSONDecodeError):
             schedulable = False
@@ -178,6 +207,7 @@ def probe_all_projects(stale_minutes: int = STALE_THRESHOLD_MINUTES) -> list:
             "task_id": task.get("id", ""),
             "task_status": task_status,
             "automation_enabled": bool(state.get("automation_enabled", True)),
+            "supervisable": True,
             "schedulable": schedulable,
             "updated_at": state.get("updated_at", ""),
             "stale": stale,
@@ -542,7 +572,8 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
                     summary = af.auto_rotate_all_agents(project)
                     if summary["agents"] or summary["files"]:
                         rotations.append(summary)
-            results = filter_active(probe_all_projects(stale_minutes))
+            all_results = probe_all_projects(stale_minutes)
+            results = filter_active(all_results)
             if target_agent:
                 results = filter_by_agent(results, target_agent)
             recovery_probes = [r for r in results if r.get("needs_recovery") or force]
@@ -552,7 +583,12 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             if crack:
                 from . import supervisor
 
-                supervision = supervisor.dispatch_projects([item["project"] for item in recovery_probes])
+                supervision_targets = [item for item in all_results if item.get("supervisable", True)]
+                if target_agent:
+                    supervision_targets = filter_by_agent(supervision_targets, target_agent)
+                if opt_in_only and not force:
+                    supervision_targets = [item for item in supervision_targets if item.get("automation_enabled")]
+                supervision = supervisor.dispatch_projects([item["project"] for item in supervision_targets])
             dispatches = supervision.get("workers", []) if supervision else []
         payload = {
             "status": "ok",

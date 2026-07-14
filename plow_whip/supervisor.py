@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from . import agent_flow as af
 from . import health
 from . import git_flow
+from . import leases
 from .io_utils import atomic_write_json, file_lock
 
 
@@ -81,13 +82,23 @@ def claim_task(project: str, task_id: str, dispatch_id: str, driver: str, agent:
                 "execution": dict(execution),
             }
         now = datetime.now().isoformat(timespec="seconds")
+        protocol = af.load_protocol(project)
+        previous_lease = execution.get("lease") or {}
+        generation = int(previous_lease.get("generation", 0)) + 1
         execution.update({
             "dispatch_id": dispatch_id, "driver": driver, "logical_owner": agent,
             "status": "starting", "claimed_at": now,
         })
+        token = None
+        if leases.is_strict(protocol):
+            token, metadata = leases.issue(
+                af.CONFIG_DIR, project, task, protocol, dispatch_id, driver, agent, generation,
+                ttl_seconds=int(protocol.get("orchestration", {}).get("lease_ttl_seconds", leases.DEFAULT_TTL_SECONDS)),
+            )
+            execution["lease"] = metadata
         try:
             af.save_state(project, state)
-            return {"claimed": True, "execution": dict(execution)}
+            return {"claimed": True, "execution": dict(execution), "lease_token": token}
         except RuntimeError:
             continue
     return {"claimed": False, "detail": "task claim lost to concurrent state updates"}
@@ -126,9 +137,16 @@ def _ensure_task_branch(project: str, state: dict) -> tuple[dict, str | None]:
     if not workflow.get("code_change") or (workflow.get("git") or {}).get("branch"):
         return state, None
     try:
-        workflow["git"] = git_flow.prepare_branch(
-            af.project_dir(project), workflow["id"], workflow.get("target_branch", "main")
-        )
+        protocol = af.load_protocol(project)
+        if leases.is_strict(protocol):
+            workspace = git_flow.workspace_path(af.CONFIG_DIR, project, workflow["id"])
+            workflow["git"] = git_flow.prepare_workspace(
+                af.project_dir(project), workspace, workflow["id"], workflow.get("target_branch", "main")
+            )
+        else:
+            workflow["git"] = git_flow.prepare_branch(
+                af.project_dir(project), workflow["id"], workflow.get("target_branch", "main")
+            )
         state["workflow"] = workflow
         af.save_state(project, state)
         return af.load_state(project), None
@@ -146,6 +164,106 @@ def _ensure_task_branch(project: str, state: dict) -> tuple[dict, str | None]:
         state["workflow"] = workflow
         af.save_state(project, state)
         return state, detail
+
+
+def reconcile_delivery(project: str, state: dict) -> dict | None:
+    """Publish accepted strict work or observe a user-performed remote merge."""
+    workflow = state.get("workflow") or {}
+    status = workflow.get("status")
+    if status not in ("delivery_ready", "awaiting_human_merge"):
+        return None
+    delivery = workflow.get("delivery") or {}
+    commit = delivery.get("commit") or workflow.get("candidate_commit")
+    target = delivery.get("target_branch") or workflow.get("target_branch", "main")
+    workspace = af.task_workspace(project, state)
+    if status == "awaiting_human_merge":
+        if not git_flow.remote_contains(af.project_dir(project), target, commit):
+            return {
+                "project": project, "task_id": workflow.get("id"),
+                "status": "awaiting_human_merge", "commit": commit,
+            }
+        workflow.update({
+            "status": "done", "completed_at": datetime.now().isoformat(timespec="seconds"),
+            "delivery": {**delivery, "status": "delivered", "merged": True, "detected_by": "scheduler"},
+        })
+        state["workflow"] = workflow
+        state.setdefault("task", {}).update({"status": "done", "next_action": "", "blockers": []})
+        af.save_state(project, state)
+        af.append_comms(project, f"delivery detected on origin/{target}: {commit}")
+        return {"project": project, "task_id": workflow.get("id"), "status": "delivered", "commit": commit}
+
+    protocol = af.load_protocol(project)
+    try:
+        published = git_flow.publish_reviewed(
+            workspace, workflow["id"], workflow.get("git") or {}, commit,
+            auto_merge=bool(protocol.get("orchestration", {}).get("auto_merge_protected", False)),
+            publisher_path=af.project_dir(project),
+        )
+    except git_flow.GitFlowBlocked as exc:
+        workflow["delivery"] = {**delivery, "status": "delivery_blocked", "error": str(exc)[-500:]}
+        state["workflow"] = workflow
+        af.save_state(project, state)
+        return {
+            "project": project, "task_id": workflow.get("id"),
+            "status": "delivery_blocked", "detail": str(exc),
+        }
+    workflow["delivery"] = published
+    if published.get("merged"):
+        workflow["status"] = "done"
+        workflow["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        state.setdefault("task", {}).update({"status": "done", "next_action": "", "blockers": []})
+    else:
+        from . import tasking
+
+        workflow["status"] = "awaiting_human_merge"
+        state.setdefault("task", {}).update({
+            "status": "awaiting_human_merge", "next_action": f"Merge {published['branch']} into {published['target_branch']}",
+            "blockers": ["human_merge_required"],
+        })
+        tasking._human_inbox(project, {
+            "type": "human_merge_required", "task_id": workflow["id"],
+            "branch": published["branch"], "target_branch": published["target_branch"],
+            "commit": published["commit"], "reason": published.get("reason", "protected merge identity unavailable"),
+        })
+        af.notify(f"{project}: 分支已推送，等待人工合并", ring=True)
+    state["workflow"] = workflow
+    af.save_state(project, state)
+    return {"project": project, "task_id": workflow.get("id"), **published}
+
+
+def quarantine_control_checkout(project: str, state: dict) -> dict | None:
+    protocol = af.load_protocol(project)
+    if not leases.is_strict(protocol):
+        return None
+    changed = git_flow.unexpected_control_changes(af.project_dir(project))
+    if not changed:
+        return None
+    task = state.get("task") or {}
+    leases.revoke(task, "unleased control-checkout changes detected")
+    task.update({
+        "status": "blocked_waiting_human", "next_action": "Inspect unauthorized control-checkout changes",
+        "blockers": ["unauthorized_control_changes", *changed[:5]],
+    })
+    workflow = state.get("workflow") or {}
+    if workflow:
+        workflow["status"] = "blocked_waiting_human"
+        state["workflow"] = workflow
+    state["task"] = task
+    af.save_state(project, state)
+    leases.audit(
+        af.CONFIG_DIR, project, "unauthorized_control_changes",
+        task_id=task.get("id"), files=changed[:20],
+    )
+    from . import tasking
+
+    tasking._human_inbox(project, {
+        "type": "unauthorized_control_changes", "task_id": task.get("id"), "files": changed[:20],
+    })
+    af.notify(f"{project}: 检测到无租约主仓库改动，任务已隔离", ring=True)
+    return {
+        "project": project, "task_id": task.get("id"),
+        "status": "quarantined_control_changes", "files": changed[:20],
+    }
 
 
 def _stop_open_circuit_workers(live: list[dict], grace_seconds: int = 30) -> list[dict]:
@@ -180,6 +298,36 @@ def _stop_open_circuit_workers(live: list[dict], grace_seconds: int = 30) -> lis
     return actions
 
 
+def _stop_revoked_workers(live: list[dict]) -> list[dict]:
+    """Terminate workers whose task or lease was frozen by a decision/state transition."""
+    actions = []
+    for worker in live:
+        try:
+            state = af.load_state(worker["project"])
+            task = state.get("task") or {}
+            execution = task.get("execution") or {}
+            lease = execution.get("lease") or {}
+            authorized = (
+                task.get("id") == worker.get("task_id")
+                and task.get("status") in ("active", "in_progress")
+                and execution.get("dispatch_id") == worker.get("dispatch_id")
+                and (not leases.is_strict(af.load_protocol(worker["project"])) or lease.get("status") == "active")
+            )
+            if authorized:
+                continue
+            cli_pid = execution.get("cli_pid")
+            if cli_pid and _pid_alive(cli_pid):
+                os.killpg(int(cli_pid), signal.SIGTERM)
+            os.killpg(int(worker["pid"]), signal.SIGTERM)
+            actions.append({
+                "project": worker["project"], "task_id": worker["task_id"],
+                "signal": signal.SIGTERM.name, "reason": "lease_revoked_or_task_frozen",
+            })
+        except (OSError, ValueError, KeyError):
+            continue
+    return actions
+
+
 def _spawn(project: str, state: dict, driver: str) -> dict:
     task = state["task"]
     dispatch_id = f"DP-{uuid.uuid4().hex[:12]}"
@@ -201,6 +349,8 @@ def _spawn(project: str, state: dict, driver: str) -> dict:
     package_root = os.path.dirname(af.PACKAGE_DIR)
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [package_root, env.get("PYTHONPATH", "")]))
+    if claim.get("lease_token"):
+        env[leases.TOKEN_ENV] = claim["lease_token"]
     command = [
         sys.executable, "-m", "plow_whip.worker", "--project", project,
         "--agent", task["owner"], "--driver", driver, "--task-id", task["id"],
@@ -240,11 +390,29 @@ def dispatch_projects(projects: list[str]) -> dict:
     reaped = reap_workers()
     probes = health.probe_open_circuits(af.CONFIG_DIR, required=3)
     stopped = _stop_open_circuit_workers(reaped["live"])
+    stopped.extend(_stop_revoked_workers(reaped["live"]))
     live = [item for item in reaped["live"] if _pid_alive(item.get("pid"))]
     counts = {driver: sum(1 for item in live if item.get("driver") == driver) for driver in health.DRIVERS}
     outcomes = []
     for project in dict.fromkeys(projects):
-        state = af.load_state(project)
+        try:
+            state = af.load_state(project)
+        except leases.StateIntegrityError as exc:
+            leases.audit(af.CONFIG_DIR, project, "state_integrity_failed", detail=str(exc))
+            outcomes.append({
+                "project": project,
+                "status": "paused_invalid_state",
+                "detail": str(exc),
+            })
+            continue
+        quarantined = quarantine_control_checkout(project, state)
+        if quarantined:
+            outcomes.append(quarantined)
+            continue
+        delivery = reconcile_delivery(project, state)
+        if delivery:
+            outcomes.append(delivery)
+            continue
         task = state.get("task") or {}
         if task.get("placeholder"):
             outcomes.append({"project": project, "task_id": task.get("id"), "status": "skipped_placeholder"})

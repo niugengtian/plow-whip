@@ -57,6 +57,12 @@ class PlowWhipTestBase(unittest.TestCase):
         save_config({
             "projects_dir": self.projects_dir,
             "agents": ["qoder", "codex", "cursor"],
+            "agent_meta": {
+                "cursor": {
+                    "roles": ["implementation"], "capabilities": ["*"],
+                    "driver": "zellij", "schedulable": True,
+                },
+            },
         })
 
     def tearDown(self):
@@ -216,7 +222,7 @@ class TestDoctor(PlowWhipTestBase):
 
         self.assertFalse(af.build_rotation_health("TestProject")["needs_enforcement"])
 
-    def test_doctor_reports_state_drift_and_repair_normalizes_it(self):
+    def test_doctor_quarantines_unsigned_state_tampering(self):
         cmd_init("TestProject")
         with open(af.state_file("TestProject"), encoding="utf-8") as f:
             state = json.load(f)
@@ -225,9 +231,9 @@ class TestDoctor(PlowWhipTestBase):
             json.dump(state, f)
         report = build_doctor_report("TestProject")
         self.assertFalse(report["ok"])
-        self.assertIn("derived state fields drifted", report["issues"][0])
+        self.assertIn("integrity check failed", report["issues"][0])
         af.cmd_repair("TestProject", FakeArgs(json=True))
-        self.assertTrue(build_doctor_report("TestProject")["ok"])
+        self.assertFalse(build_doctor_report("TestProject")["ok"])
 
     def test_doctor_reports_corrupt_protocol_without_crashing(self):
         cmd_init("TestProject")

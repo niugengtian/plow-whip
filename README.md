@@ -9,6 +9,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 - **上下文漂移**：启动只返回当前任务、有效规则和定向信息，不要求每轮重读整套文档。
 - **职责混乱**：Registry 描述长期角色与能力，Router 确定性选人，Driver 负责实际执行。
 - **状态失真**：任务进度、下一步、阻塞和验收结果原子写入一个状态真源。
+- **会话越权**：新项目默认使用签名租约；无租约会话只有 observer 权限，不能机器回写或进入交付。
 - **自动化中断**：系统原生 scheduler 定期运行一次性扫描，只恢复明确启用且需要续作的任务。
 - **Token 成本失控**：状态探针和任务分类完全在本地完成；明确的小任务可交给持久化的 DeepSeek simple-tasker。
 - **结果难追责**：每次投递记录逻辑 owner、实际 executor、Driver、dispatch ID 和精简失败证据。
@@ -50,7 +51,7 @@ Submit（Codex Desktop 控制面、CLI 或其他入口）
 | 真源 | 作用 |
 |---|---|
 | `collab/AGENT_PROTOCOL.json` | 机器协议、有效规则与项目 Registry |
-| `collab/AGENT_STATE.json` | 当前 Workflow、Task、owner、进度、会话和投递状态 |
+| `collab/AGENT_STATE.json` | 当前 Workflow、Task、owner、进度、会话和投递状态；严格项目带 authority 完整性签名 |
 | `plow-whip ... start --json` | Agent 的唯一启动入口；从真源生成最小执行包 |
 
 Agent 名称代表长期职责身份，不绑定某个模型或客户端。一次执行可以同时区分：
@@ -95,7 +96,7 @@ plow-whip --project MyProject doctor --json
 
 ```bash
 plow-whip --project MyProject new \
-  --owner codex \
+  --owner codex_cli \
   --first-action "完成首个可验证任务"
 ```
 
@@ -105,7 +106,9 @@ plow-whip --project MyProject new \
 plow-whip --project MyProject repair --json
 ```
 
-`doctor --repair` 是兼容入口。`doctor` 会校验协议、状态、task owner 和派生字段一致性；损坏的 canonical JSON 不会被 repair 静默覆盖。
+`doctor --repair` 是兼容入口。`doctor` 会校验协议、状态、task owner、派生字段和 authority 签名；损坏或被直接篡改的 canonical JSON 不会被 repair 静默覆盖。
+
+由当前版本 `init/new` 创建的项目默认写入 `enforcement.mode=strict` 和独立 `protocol_epoch`。升级前已经存在、且协议中没有 `enforcement` 的项目继续按旧模式运行，不会被自动迁移。
 
 ### 3. 提交任务
 
@@ -122,7 +125,9 @@ plow-whip --project MyProject plan confirm
 
 计划未确认时状态为 `blocked_waiting_human`，scheduler 不会执行。确认后恢复无人值守。旧的 `task start` 和 `goal` 命令仍保留兼容。
 
-### 4. 回写进度并完成验收
+### 4. Worker 回写进度并完成验收
+
+以下命令只供 scheduler 签发租约后启动的 Worker 使用。Codex Desktop 或其他无租约会话执行 `start` 时会得到 `authorization.mode=observer`，启动包不会包含 `writeback`：
 
 ```bash
 plow-whip --project MyProject task progress \
@@ -147,13 +152,14 @@ plow-whip --project MyProject status
 ```text
 submit（项目默认启用 automation）
   → 系统 scheduler 每 60 秒启动一个有锁的零 Token 短进程
-  → 只读状态、PID、Session、revision、熔断与并发槽
-  → 后台 Worker 原子绑定一个 Task 与一个 CLI Session
+  → 原子领取 Task，签发绑定 Owner/Driver/dispatch/epoch 的短期租约
+  → 后台 Worker 只在任务独立 worktree 中执行，并绑定一个 CLI Session
   → 实现完成后运行 verify_commands
-  → 独立 Reviewer（默认不同 CLI）验收
+  → 提交候选 commit；独立 Reviewer（默认不同 CLI）验收准确 SHA
   → Reviewer 拒绝则恢复原执行器的原 Session 修复
-  → 验收通过后推送任务分支并 fast-forward 更新目标分支
-  → 远端确认后归档会话并完成 Workflow
+  → scheduler 发布进程推送任务分支
+  → 已配置受保护合并身份时 fast-forward；否则提示人工合并
+  → scheduler 检测远端目标分支包含已验收 SHA 后完成 Workflow
 ```
 
 安装跨平台用户级定时任务：
@@ -184,6 +190,9 @@ plow-whip scheduler status
 - `simple_tasker` 复用现有 DeepSeek Brain API 客户端，但增加项目沙箱工具、Task 级 JSONL 会话、断点恢复和自动上下文压缩；生产 Key 只读取环境变量。
 - `zellij` 依赖可用的本地会话；`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
+- 新项目中的 Codex Desktop 和默认 Cursor Desktop 是控制面：可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
+- 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 固定 strict 模式与 `protocol_epoch`，状态和日志只保存不可逆 lease ID，不保存 Token。
+- Worker worktree 的 push URL 被禁用；发布由 scheduler 父进程从控制 checkout 完成。目标分支自动更新默认关闭，未配置受保护身份时只推送 `plow/*` 分支。
 - `blocked` 和 `done` 永不自动派发。任务需要外部凭据、人工审批或产品决策时，应明确 block，而不是绕过边界。
 - API Key/Profile 池只对认证、额度和限流错误切换。网络或服务异常打开对应 CLI 的独立熔断器，不累计 Task 重试；连续三次无 Token 探测成功后自动恢复。
 - 海外出口探测包含 DNS、国内网络、`curl ifconfig.me`、TLS 和 Provider 端点。全局海外网络中断会熔断全部外部 CLI；单个 Provider 故障只暂停对应 CLI。
@@ -194,7 +203,9 @@ plow-whip scheduler status
 
 ### 原子状态与并发保护
 
-`task start|progress|block|complete` 原子更新 `AGENT_STATE.json`，并使用 revision 防止旧写入覆盖新进度。任务状态、下一步、阻塞和验收结果不会分散在多份留言里。
+`task progress|block|complete` 在严格项目中必须同时通过租约签名、Task、Owner、dispatch ID、租约代数、有效期和 `protocol_epoch` 校验。状态继续使用 revision 与原子替换防止旧写入覆盖，并增加 HMAC 完整性签名；直接编辑严格项目的状态会被 doctor 和 scheduler 拒绝。
+
+`start` 对无租约会话仍返回有界只读上下文，但标记为 `observer` 且不返回写回命令。旧线程即使保留历史指令，也无法重放过期租约。
 
 ### 有界恢复，不无限烧 token
 
@@ -206,7 +217,29 @@ plow-whip scheduler status
 
 ### Git 交付原子性
 
-代码任务在执行前从目标分支创建 `plow/<task-id>` 独立分支。Reviewer 通过后由 plow-whip 提交未提交改动、推送任务分支，并使用远端 fast-forward 更新目标分支。目标分支已经移动且无法快进时进入 `blocked_waiting_human`；系统绝不自动 rebase。
+严格代码任务从目标分支创建 `plow/<task-id>`，并在本机配置目录建立独立 linked worktree；控制 checkout 不再切换任务分支。实现结束先提交候选 SHA，Reviewer 只能验收该 SHA；Reviewer 改动文件或 HEAD 变化会触发完整性阻塞。
+
+发布进程先推送任务分支。仅当 `orchestration.auto_merge_protected=true` 且远端允许受保护发布身份时，才尝试 fast-forward 目标分支；否则进入 `awaiting_human_merge`。人工合并后 scheduler 自动验证 `origin/<target>` 包含准确 SHA 并标记 `delivered`，系统绝不自动 rebase。
+
+### 必须由人决断的分裂
+
+Worker 遇到二选一或必然分裂时使用：
+
+```bash
+plow-whip --project MyProject decision request \
+  --summary "选择持久化方案" \
+  --option SQLite \
+  --option PostgreSQL \
+  --recommended SQLite
+```
+
+系统撤销当前任务租约、写入 `human_inbox.jsonl`，并只冻结该 Task。人类控制面答复后，scheduler 签发新一代租约续接：
+
+```bash
+plow-whip --project MyProject decision answer \
+  --choice SQLite \
+  --note "当前是单机小规模负载"
+```
 
 ### 可追踪的投递生命周期
 
@@ -257,7 +290,7 @@ plow-whip --project MyProject agent set backend-backup \
   --priority 70
 ```
 
-Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面，只负责人工交互与 `submit`，不会成为 Task owner、执行器、CLI Session、重试或故障切换目标；`codex_cli` 是独立的 Planner、实现者和 Reviewer。可执行 Driver 是封闭集合：`codex_cli`、`cursor_cli`、`simple_tasker`、`zellij`、`file`。
+Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面；新项目中的默认 `cursor` 也只作为控制面。它们负责人工交互、`submit`、计划确认和决策答复，不会成为 Task owner、执行器、CLI Session、重试或故障切换目标；`codex_cli` 与 `cursor_cli` 才是执行 Driver。项目可以显式修改 Registry，但严格项目的机器回写仍必须持有租约。
 
 ### Codex Desktop 对话同步
 
@@ -379,7 +412,7 @@ collab/
 ├── AGENT_STATE.json      # 当前任务与运行状态；状态真源
 ├── AGENTS.md             # 从协议派生的人类阵容表
 ├── AGENT_COMMS.md        # 近期定向消息，自动检查轮转
-├── human_inbox.jsonl     # 计划确认与 FF 阻塞等可恢复的人类决策入口
+├── human_inbox.jsonl     # 计划确认、任务分裂与人工合并等可恢复的人类入口
 ├── CONVENTIONS.agent.md  # 旧工具兼容指针
 ├── CONVENTIONS.md        # 旧工具兼容指针
 ├── conversations/        # Agent 会话与归档
@@ -389,6 +422,8 @@ collab/
 ```
 
 新项目就绪所需的 memory 结构只有 `DECISIONS.md` 和 `sessions/`。旧版 `NEXT_ACTION.md`、`CURRENT_STATUS.md`、`ROADMAP.md` 可保留，但不参与启动和 doctor 就绪判定。
+
+本机私有运行目录还保存 `runtime/authority/lease-secret`、`runtime/authority/protocols/`、授权审计 `logs/authorization.jsonl` 和 `worktrees/<project>/<task>/`。这些文件不进入项目仓库；状态只记录不可逆 lease ID 与相对 `workspace_ref`。严格协议被删除 `enforcement` 或替换 epoch 时，authority pin 会拒绝降级加载。
 
 规则包含四个维度：`scope=global|project`、`priority=required|important`、`origin=local|inherited|derived`、`enforcement=block|require_approval|verify|warn|inform`。`start --json` 返回全部 mandatory rules，并根据 Agent 和任务 `rule_tags` 返回相关 important rules；只有需要完整细则时才给出定向 `required_context`。`rules_meta.effective_hash` 用于识别规则变化。
 
@@ -421,7 +456,7 @@ collab/
 | `agent set` | 设置角色、能力、Driver、schedulable、优先级、成本和 assignment |
 | `start` | 返回完整但有界的最小启动 payload；Agent 唯一启动入口 |
 | `context-pack` | `start` 的废弃兼容别名 |
-| `drive` | 通过 Registry 中配置的 Driver 执行指定逻辑 Agent |
+| `drive` | 旧项目可直接驱动；严格项目拒绝把它作为执行入口，统一使用 `submit` + scheduler |
 | `permit` | allow/ask/reject 或检查投递权限 |
 | `bind-tab` | 将项目绑定到 zellij tab |
 
@@ -434,10 +469,12 @@ collab/
 | `plan confirm` / `reject` / `status` | 确认、退回或查看非 Goal 计划 |
 | `review reject` | 独立 Reviewer 拒绝并恢复原执行器 Session 修复 |
 | `automation enable` / `disable` / `status` | 控制单个项目的无人值守开关 |
-| `task start` | 创建当前原子任务；控制面调用会被拒绝并引导使用 `submit` |
+| `task start` | 旧项目兼容命令；严格项目拒绝并引导使用 `submit` |
 | `task progress` | 原子回写产出、下一步，并可更新验收与验证命令 |
 | `task block` | 写入阻塞原因并暂停自动派发 |
 | `task complete` | 运行验证命令；通过后完成任务并推进 Goal |
+| `decision request` | Worker 撤销当前租约并提交 2–3 个必须由人选择的方案 |
+| `decision answer` / `status` | 控制面答复或查看决策；答复后 scheduler 重新签发租约 |
 | `goal start` | 提交或排队一个交付目标；可用 `--replace` 显式替换 |
 | `goal plan` | 提交 1–7 个粗粒度里程碑和压缩上下文 |
 | `goal status` | 查看当前 Goal 与进度 |

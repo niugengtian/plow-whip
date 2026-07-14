@@ -27,6 +27,7 @@ from plow_whip.whip import (
     generate_whip_prompt,
     run_once,
     scan_all_projects,
+    probe_all_projects,
 )
 from plow_whip.agent_flow import save_config
 
@@ -52,6 +53,12 @@ class WhipTestBase(unittest.TestCase):
         save_config({
             "projects_dir": self.projects_dir,
             "agents": ["qoder", "codex", "cursor"],
+            "agent_meta": {
+                "cursor": {
+                    "roles": ["implementation"], "capabilities": ["*"],
+                    "driver": "zellij", "schedulable": True,
+                },
+            },
         })
 
     def tearDown(self):
@@ -286,6 +293,25 @@ class TestCmdWhip(WhipTestBase):
             with patch.object(af, "auto_rotate_all_agents", side_effect=lambda project: events.append("rotate") or {"agents": [], "files": []}):
                 run_once(auto_rotate=True)
         self.assertEqual(events[:2], ["sync", "rotate"])
+
+    def test_tampered_strict_project_is_isolated_from_supervisor(self):
+        af.cmd_init("Tampered")
+        with open(af.state_file("Tampered"), encoding="utf-8") as handle:
+            state = json.load(handle)
+        state["next_action"] = "unsigned mutation"
+        with open(af.state_file("Tampered"), "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+
+        probe = probe_all_projects()[0]
+        self.assertEqual(probe["status"], "invalid_state")
+        self.assertFalse(probe["supervisable"])
+
+        with patch("plow_whip.supervisor.dispatch_projects") as mock_supervise:
+            mock_supervise.return_value = {"workers": [], "outcomes": []}
+            result = run_once(crack=True)
+
+        mock_supervise.assert_called_once_with([])
+        self.assertEqual(result["status"], "ok")
 
     @patch("plow_whip.whip.run_once")
     def test_legacy_daemon_flags_run_once(self, mock_once):

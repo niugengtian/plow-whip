@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 
 from . import git_flow
+from . import leases
 from . import protocol as proto
 from . import routing
 from .io_utils import file_lock
@@ -19,6 +20,17 @@ DRIVER_ALIASES = {
     "cursor": "cursor_cli", "cursor-cli": "cursor_cli", "cursor_cli": "cursor_cli",
     "deepseek": "simple_tasker", "simple-tasker": "simple_tasker", "simple_tasker": "simple_tasker",
 }
+
+
+def _prepare_git(project: str, workflow: dict) -> dict:
+    from . import agent_flow as af
+
+    data = af.load_protocol(project)
+    target = workflow.get("target_branch", "main")
+    if leases.is_strict(data):
+        workspace = git_flow.workspace_path(af.CONFIG_DIR, project, workflow["id"])
+        return git_flow.prepare_workspace(af.project_dir(project), workspace, workflow["id"], target)
+    return git_flow.prepare_branch(af.project_dir(project), workflow["id"], target)
 EXPLICIT_DRIVER_PATTERNS = (
     (re.compile(r"\b(?:codex[ _-]?cli)\b", re.I), "codex_cli"),
     (re.compile(r"\b(?:cursor[ _-]?cli)\b", re.I), "cursor_cli"),
@@ -243,7 +255,7 @@ def submit(
             task["verification_policy"] = "sandboxed"
         if decision["code_change"]:
             try:
-                workflow["git"] = git_flow.prepare_branch(af.project_dir(project), task_id, target)
+                workflow["git"] = _prepare_git(project, workflow)
             except git_flow.GitFlowBlocked as exc:
                 workflow["git"] = {"status": "pending", "target_branch": target, "error": str(exc)}
             workflow["queue"] = [_review_task(data, task_id, text, owner)]
@@ -368,9 +380,7 @@ def confirm_plan(project: str) -> dict:
         raise ValueError("no proposed plan is waiting for confirmation")
     if workflow.get("code_change") and not (workflow.get("git") or {}).get("branch"):
         try:
-            workflow["git"] = git_flow.prepare_branch(
-                af.project_dir(project), workflow["id"], workflow.get("target_branch", "main")
-            )
+            workflow["git"] = _prepare_git(project, workflow)
         except git_flow.GitFlowBlocked as exc:
             workflow["git"] = {
                 "status": "pending", "target_branch": workflow.get("target_branch", "main"), "error": str(exc),
@@ -406,6 +416,81 @@ def reject_plan(project: str, reason: str) -> dict:
     state["task"] = task
     af.save_state(project, state)
     return {"project": project, "workflow": workflow, "task": task}
+
+
+def request_decision(project: str, summary: str, options: list[str], recommended: str | None = None) -> dict:
+    """Freeze exactly one task and persist a bounded human choice request."""
+    from . import agent_flow as af
+
+    choices = [str(item).strip() for item in options if str(item).strip()]
+    if not 2 <= len(choices) <= 3:
+        raise ValueError("a decision request needs 2 or 3 concrete options")
+    if recommended and recommended not in choices:
+        raise ValueError("recommended choice must exactly match one option")
+    state = af.load_state(project)
+    task = state.get("task") or {}
+    if task.get("status") not in ("active", "in_progress"):
+        raise ValueError("current task is not executing")
+    workflow = state.get("workflow") or {}
+    decision_id = f"D-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    request = {
+        "id": decision_id, "status": "pending", "summary": summary[:2000],
+        "options": choices, "recommended": recommended,
+        "requested_at": datetime.now().isoformat(timespec="seconds"),
+        "workflow_resume_status": workflow.get("status", "active"),
+    }
+    leases.revoke(task, "human decision required")
+    task.update({
+        "status": "blocked_waiting_human", "next_action": "Wait for human decision",
+        "blockers": ["decision_required"], "decision_request": request,
+    })
+    workflow["status"] = "blocked_waiting_human"
+    state["task"] = task
+    state["workflow"] = workflow
+    af.save_state(project, state)
+    _human_inbox(project, {
+        "type": "decision_required", "task_id": task.get("id"),
+        "source": workflow.get("source"), "interaction": workflow.get("interaction", {}),
+        **request,
+    })
+    af.append_comms(project, f"@human decision required {decision_id}: {summary[:500]}")
+    af.notify(f"{project}: 任务等待人工决策", ring=True)
+    return {"project": project, "decision": request, "task": task}
+
+
+def answer_decision(project: str, choice: str, note: str = "") -> dict:
+    """Record the human choice and make the frozen task schedulable again."""
+    from . import agent_flow as af
+
+    state = af.load_state(project)
+    task = state.get("task") or {}
+    request = task.get("decision_request") or {}
+    if request.get("status") != "pending":
+        raise ValueError("no decision is waiting for an answer")
+    options = request.get("options") or []
+    selected = str(choice).strip()
+    if selected.isdigit() and 1 <= int(selected) <= len(options):
+        selected = options[int(selected) - 1]
+    if selected not in options:
+        raise ValueError("choice must be an option value or its 1-based number")
+    answered_at = datetime.now().isoformat(timespec="seconds")
+    request.update({"status": "answered", "choice": selected, "note": note[:1000], "answered_at": answered_at})
+    task.setdefault("decision_ids", []).append(request["id"])
+    task.update({
+        "status": "active", "next_action": f"Continue using human decision: {selected}",
+        "blockers": [], "decision_request": request,
+    })
+    workflow = state.get("workflow") or {}
+    workflow["status"] = request.get("workflow_resume_status") or "active"
+    state["task"] = task
+    state["workflow"] = workflow
+    af.save_state(project, state)
+    decisions = os.path.join(af.project_memory_dir(project), "DECISIONS.md")
+    with file_lock(decisions + ".lock"):
+        with open(decisions, "a", encoding="utf-8") as file:
+            file.write(f"\n| {request['id']} | {answered_at[:10]} | {selected} — {note[:500]} | Accepted |\n")
+    af.append_comms(project, f"decision answered {request['id']}: {selected}; scheduler may resume")
+    return {"project": project, "decision": request, "task": task}
 
 
 def is_git_delivery_retry(workflow: dict, task: dict) -> bool:
@@ -454,6 +539,8 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
     workflow = state.get("workflow") or {}
     if workflow.get("status") != "active":
         return None
+    protocol = af.load_protocol(project)
+    strict = leases.is_strict(protocol)
     if not any(item.get("id") == completed_task.get("id") for item in workflow.setdefault("completed", [])):
         workflow["completed"].append({
             "id": completed_task.get("id"), "title": completed_task.get("title"),
@@ -462,16 +549,64 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
         })
     if completed_task.get("stage") == "implementation":
         workflow["last_implementation"] = copy.deepcopy(completed_task)
+        if strict and workflow.get("code_change"):
+            try:
+                candidate = git_flow.checkpoint_branch(
+                    af.task_workspace(project, state), workflow["id"], workflow.get("git") or {},
+                    message=f"feat: checkpoint {completed_task.get('id')}",
+                )
+            except git_flow.GitFlowBlocked as exc:
+                completed_task.update({
+                    "status": "blocked_waiting_human", "next_action": "Resolve task checkpoint blocker",
+                    "blockers": [str(exc)],
+                })
+                workflow["status"] = "blocked_waiting_human"
+                state["workflow"] = workflow
+                state["task"] = completed_task
+                _human_inbox(project, {
+                    "type": "git_checkpoint_blocked", "task_id": workflow["id"], "reason": str(exc),
+                })
+                return completed_task, "blocked_waiting_human"
+            workflow["candidate_commit"] = candidate
+            workflow.setdefault("git", {})["candidate_commit"] = candidate
     if workflow.get("queue"):
         task = workflow["queue"].pop(0)
         if task.get("stage") == "review" and not task.get("verify_commands"):
             task["verify_commands"] = list(completed_task.get("verify_commands") or [])
             if completed_task.get("verification_policy"):
                 task["verification_policy"] = completed_task["verification_policy"]
+        if task.get("stage") == "review" and workflow.get("candidate_commit"):
+            task["candidate_commit"] = workflow["candidate_commit"]
         state["workflow"] = workflow
         state["task"] = task
         return task, "advance"
     if workflow.get("code_change"):
+        if strict:
+            try:
+                git_flow.assert_review_commit(
+                    af.task_workspace(project, state), workflow.get("candidate_commit", "")
+                )
+            except git_flow.GitFlowBlocked as exc:
+                completed_task.update({
+                    "status": "blocked_waiting_human", "next_action": "Resolve review integrity violation",
+                    "blockers": [str(exc)],
+                })
+                workflow["status"] = "blocked_waiting_human"
+                state["workflow"] = workflow
+                state["task"] = completed_task
+                _human_inbox(project, {
+                    "type": "review_integrity_violation", "task_id": workflow["id"], "reason": str(exc),
+                })
+                return completed_task, "blocked_waiting_human"
+            workflow["status"] = "delivery_ready"
+            workflow["delivery"] = {
+                "status": "ready", "commit": workflow["candidate_commit"],
+                "branch": (workflow.get("git") or {}).get("branch"),
+                "target_branch": workflow.get("target_branch", "main"),
+            }
+            state["workflow"] = workflow
+            state["task"] = completed_task
+            return completed_task, "delivery_ready"
         try:
             delivery = git_flow.finalize_fast_forward(
                 af.project_dir(project),

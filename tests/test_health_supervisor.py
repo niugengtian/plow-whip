@@ -115,6 +115,29 @@ class SupervisorTest(unittest.TestCase):
         self.assertFalse(second["claimed"])
         self.assertIn("already executing", second["detail"])
 
+    def test_branch_only_delivery_waits_then_detects_human_merge(self):
+        state = af.load_state("P0")
+        state["task"].update({"placeholder": False, "status": "done"})
+        state["workflow"] = {
+            "id": "T-delivery", "status": "delivery_ready", "target_branch": "main",
+            "candidate_commit": "abc123", "git": {"branch": "plow/t-delivery", "target_branch": "main"},
+            "delivery": {"status": "ready", "commit": "abc123", "target_branch": "main"},
+        }
+        af.save_state("P0", state)
+        published = {
+            "status": "awaiting_human_merge", "branch": "plow/t-delivery", "target_branch": "main",
+            "commit": "abc123", "pushed": True, "merged": False,
+        }
+        with patch("plow_whip.supervisor.git_flow.publish_reviewed", return_value=published), \
+             patch("plow_whip.supervisor.af.notify"):
+            result = supervisor.reconcile_delivery("P0", af.load_state("P0"))
+        self.assertEqual(result["status"], "awaiting_human_merge")
+        self.assertEqual(af.load_state("P0")["workflow"]["status"], "awaiting_human_merge")
+        with patch("plow_whip.supervisor.git_flow.remote_contains", return_value=True):
+            result = supervisor.reconcile_delivery("P0", af.load_state("P0"))
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(af.load_state("P0")["workflow"]["status"], "done")
+
 
 if __name__ == "__main__":
     unittest.main()

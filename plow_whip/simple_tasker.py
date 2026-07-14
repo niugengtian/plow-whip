@@ -46,10 +46,11 @@ class SimpleTasker:
         task_id: str,
         client=None,
         context_limit_chars: int = DEFAULT_CONTEXT_CHARS,
+        session_dir: str | None = None,
     ):
         self.project_path = os.path.realpath(project_path)
         self.task_id = re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)
-        session_dir = os.path.join(self.project_path, "collab", "memory", "sessions")
+        session_dir = session_dir or os.path.join(self.project_path, "collab", "memory", "sessions")
         os.makedirs(session_dir, exist_ok=True)
         self.session_path = os.path.join(session_dir, f"{self.task_id}_simple_tasker.jsonl")
         self.meta_path = os.path.join(session_dir, f"{self.task_id}_simple_tasker.meta.json")

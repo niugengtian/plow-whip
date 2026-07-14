@@ -65,6 +65,7 @@ TRACKED_COLLAB_FILES = [
 from . import rotation as rot
 from . import protocol as proto
 from . import routing
+from . import leases
 from .io_utils import atomic_write_json, atomic_write_text, file_lock
 
 # Agent mention patterns for activity detection
@@ -146,6 +147,19 @@ def project_dir(project):
     return os.path.join(get_projects_dir(), project)
 
 
+def task_workspace(project, state=None):
+    """Resolve the active strict-task worktree; legacy work stays in the project checkout."""
+    state = state or load_state(project)
+    ref = ((state.get("workflow") or {}).get("git") or {}).get("workspace_ref")
+    if not ref:
+        return project_dir(project)
+    root = os.path.realpath(os.path.join(CONFIG_DIR, "worktrees"))
+    candidate = os.path.realpath(os.path.join(root, ref))
+    if os.path.commonpath([root, candidate]) != root:
+        raise ValueError("task workspace reference escapes the runtime root")
+    return candidate
+
+
 def validate_identifier(value, label="identifier"):
     if not isinstance(value, str) or not value.strip() or value in (".", ".."):
         raise ValueError(f"invalid {label}: {value!r}")
@@ -191,7 +205,9 @@ def handbook_file(project):
 
 
 def load_protocol(project):
-    return proto.load(project_dir(project))
+    data = proto.load(project_dir(project))
+    leases.verify_protocol(CONFIG_DIR, project, data)
+    return data
 
 
 def get_project_agents(project):
@@ -335,6 +351,8 @@ def load_state(project):
         sys.exit(1)
     with open(sf, encoding="utf-8") as f:
         state = json.load(f)
+    if os.path.exists(protocol_file(project)):
+        leases.verify_state(CONFIG_DIR, project, state, load_protocol(project))
     interaction = (state.get("workflow") or {}).get("interaction") or {}
     legacy_thread_id = interaction.pop("thread_id", None)
     if legacy_thread_id and "thread_ref" not in interaction:
@@ -394,10 +412,15 @@ def write_state(project, state, touch=True):
         disk_revision = 0
         if os.path.exists(sf):
             with open(sf, encoding="utf-8") as f:
-                disk_revision = json.load(f).get("revision", 0)
+                disk_state = json.load(f)
+            if os.path.exists(protocol_file(project)):
+                leases.verify_state(CONFIG_DIR, project, disk_state, load_protocol(project))
+            disk_revision = disk_state.get("revision", 0)
             if state.get("revision", 0) != disk_revision:
                 raise RuntimeError(f"state revision conflict: expected {state.get('revision', 0)}, found {disk_revision}")
         state["revision"] = disk_revision + 1
+        if os.path.exists(protocol_file(project)):
+            leases.sign_state(CONFIG_DIR, project, state, load_protocol(project))
         atomic_write_json(sf, state)
 
 
@@ -490,6 +513,8 @@ def cmd_agent(args, project=None):
         return
 
     if project and os.path.exists(state_file(project)):
+        if os.path.exists(protocol_file(project)):
+            load_protocol(project)
         data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
         old = data.setdefault("agents", {}).get(args.name, {})
         meta = {
@@ -1318,7 +1343,8 @@ def cmd_init(project, args=None):
         write_rendered(os.path.join(mem_dir, out_name), f"memory/{tpl_name}", project)
 
     # Canonical machine protocol + derived human handbook.
-    proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+    data = proto.ensure(project_dir(project), project, get_agents(), get_agent_meta())
+    leases.pin_protocol(CONFIG_DIR, project, data)
     proto.write_handbook(project_dir(project))
     _write_compat_conventions(project)
     write_agent_manifest(project)
@@ -1396,9 +1422,13 @@ def _ensure_plow_whip_structure(project):
                 legacy_state = json.load(f)
             seed_agents = legacy_state.get("agents") or seed_agents
             seed_meta = legacy_state.get("agent_meta") or seed_meta
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, RuntimeError):
             pass
-    proto.ensure(project_dir(project), project, seed_agents, seed_meta)
+    protocol_existed = os.path.exists(protocol_file(project))
+    if protocol_existed:
+        load_protocol(project)
+    data = proto.ensure(project_dir(project), project, seed_agents, seed_meta)
+    leases.pin_protocol(CONFIG_DIR, project, data)
     proto.write_handbook(project_dir(project))
     for agent in get_project_agents(project):
         agent_dir = os.path.join(conversations_dir(project), agent)
@@ -1437,7 +1467,7 @@ def _state_protocol_issues(project):
         agents = proto.enabled_agents(data)
         proto.effective_rules(data)
         issues.extend(proto.semantic_issues(data))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError, leases.ProtocolIntegrityError) as exc:
         return [f"invalid AGENT_PROTOCOL.json: {exc}"]
     try:
         with open(handbook_file(project), encoding="utf-8") as f:
@@ -1451,6 +1481,10 @@ def _state_protocol_issues(project):
             raw = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
         return [f"invalid AGENT_STATE.json: {exc}"]
+    try:
+        leases.verify_state(CONFIG_DIR, project, raw, data)
+    except leases.StateIntegrityError as exc:
+        return [str(exc)]
     task = raw.get("task")
     if not isinstance(task, dict):
         return ["AGENT_STATE.json has no canonical task object"]
@@ -1502,7 +1536,11 @@ def build_doctor_report(project):
         ("collab/CONVENTIONS.agent.md", conventions_agent_file(project)),
         ("collab/CONVENTIONS.md", conventions_human_file(project)),
     ]
-    for agent in get_project_agents(project):
+    try:
+        doctor_agents = get_project_agents(project)
+    except leases.ProtocolIntegrityError:
+        doctor_agents = get_agents()
+    for agent in doctor_agents:
         required.append((f"collab/conversations/{agent}/current.md", os.path.join(conversations_dir(project), agent, "current.md")))
     checks = [{"name": name, "path": path, "ok": os.path.exists(path)} for name, path in required]
     optional_checks = [{"name": name, "path": path, "ok": os.path.exists(path)} for name, path in optional]
@@ -1554,7 +1592,7 @@ def cmd_doctor(project, args):
             _ensure_plow_whip_structure(project)
             if not getattr(args, "skip_rotate", False):
                 enforce_project_rotation(project)
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError):
             pass
     report = build_doctor_report(project)
     health = build_rotation_health(project) if report["ok"] else None
@@ -1571,7 +1609,7 @@ def cmd_repair(project, args):
     error = None
     try:
         _ensure_plow_whip_structure(project)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
         error = str(exc)
     report = build_doctor_report(project)
     payload = {"project": project, "repaired": report["ok"], "error": error, "doctor": report}
@@ -1683,6 +1721,17 @@ def build_start_pack(project, agent=None):
             "enabled_agents": agents,
         }
     raw_task = dict(state.get("task", {}))
+    authorization = {"mode": "worker", "execution_allowed": True, "reason": "legacy_project"}
+    if leases.is_strict(data):
+        try:
+            lease = leases.validate(CONFIG_DIR, project, state, data, agent=agent)
+            authorization = {
+                "mode": "worker", "execution_allowed": True,
+                "lease_id": (raw_task.get("execution") or {}).get("lease", {}).get("id"),
+                "dispatch_id": lease.get("dispatch_id"),
+            }
+        except leases.LeaseDenied as exc:
+            authorization = {"mode": "observer", "execution_allowed": False, "reason": str(exc)}
     task = _bounded_start_task(raw_task)
     task["owner"] = state.get("assigned_agent") or task.get("owner")
     raw_next = state.get("next_action", raw_task.get("next_action", ""))
@@ -1714,22 +1763,24 @@ def build_start_pack(project, agent=None):
     pack = {
         "ready": True,
         "project": project,
-        "project_path": project_dir(project),
+        "project_path": task_workspace(project, state) if authorization["execution_allowed"] else project_dir(project),
         "agent": agent,
+        "authorization": authorization,
         "task": task,
         "goal": goal_view,
         **rule_pack,
         "messages": messages,
         "decision_ids": task.get("decision_ids", []),
         "memory": data.get("memory", {}),
-        "writeback": {
+    }
+    if authorization["execution_allowed"]:
+        pack["writeback"] = {
             "progress": f"plow-whip --project {project} task progress --output '...' --next '...'",
             "complete": f"plow-whip --project {project} task complete --output '...'",
             "handoff": f"plow-whip --project {project} handoff --to <agent> --output '...' --next '...'",
             "goal_plan": f"plow-whip --project {project} goal plan --context-summary '...' --plan-json '[{{...}}]'",
             "plan_propose": f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'",
-        },
-    }
+        }
     if "planning" in raw_task.get("rule_tags", []):
         pack["routing_catalog"] = routing.planner_catalog(data)
     pack["rules_meta"]["startup_payload_max_chars"] = START_PACK_MAX_CHARS
@@ -1793,6 +1844,23 @@ def cmd_review(project, args):
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def cmd_decision(project, args):
+    from . import tasking
+
+    if args.action == "request":
+        payload = tasking.request_decision(project, args.summary, args.option, args.recommended)
+    elif args.action == "answer":
+        payload = tasking.answer_decision(project, args.choice, args.note or "")
+    else:
+        state = load_state(project)
+        payload = {
+            "project": project,
+            "decision": (state.get("task") or {}).get("decision_request"),
+            "task_id": (state.get("task") or {}).get("id"),
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def cmd_automation(project, args):
     state = load_state(project)
     if args.action in ("enable", "disable"):
@@ -1821,19 +1889,23 @@ def cmd_health(args):
 def run_task_verification(project, commands, task=None):
     """Run the task's explicit acceptance commands and stop at first failure."""
     results = []
+    workspace = task_workspace(project)
     for command in commands:
         if (task or {}).get("verification_policy") == "sandboxed":
             from .simple_tasker import SimpleTasker
 
             try:
-                sandboxed = SimpleTasker(project_dir(project), (task or {}).get("id", "verification")).run_command(command)
+                sandboxed = SimpleTasker(
+                    workspace, (task or {}).get("id", "verification"),
+                    session_dir=os.path.join(project_memory_dir(project), "sessions"),
+                ).run_command(command)
             except ValueError as exc:
                 sandboxed = {"returncode": 126, "output": f"sandbox rejected verification command: {exc}"}
             result = {"command": command, "returncode": sandboxed["returncode"], "output": sandboxed["output"][-2000:]}
         else:
             completed = subprocess.run(
                 command,
-                cwd=project_dir(project),
+                cwd=workspace,
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -2043,6 +2115,8 @@ def cmd_task(project, args):
         elif action == "block":
             task["status"] = "blocked"
             task["blockers"] = getattr(args, "blockers", None) or []
+            if leases.is_strict(load_protocol(project)):
+                leases.revoke(task, "task blocked")
         elif action == "complete":
             if git_delivery_retry:
                 state["workflow"]["status"] = "active"
@@ -2077,6 +2151,8 @@ def cmd_task(project, args):
         else:
             task["status"] = "active"
     completed_task = task
+    if action == "complete" and task.get("status") == "done" and leases.is_strict(load_protocol(project)):
+        leases.revoke(task, "task execution finished")
     goal = state.get("goal") or {}
     workflow_handled = False
     if action == "complete" and task.get("status") == "done" and (state.get("workflow") or {}).get("status") == "active":
@@ -2409,6 +2485,63 @@ def cmd_inbox(args):
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _machine_write_action(args) -> str | None:
+    """Return the lease-protected operation represented by parsed CLI args."""
+    command = getattr(args, "command", None)
+    action = getattr(args, "action", None)
+    if command == "task" and action in ("start", "progress", "block", "complete"):
+        return f"task.{action}"
+    if command == "handoff":
+        return "handoff"
+    if command == "plan" and action == "propose":
+        return "plan.propose"
+    if command == "review" and action == "reject":
+        return "review.reject"
+    if command == "decision" and action == "request":
+        return "decision.request"
+    if command == "goal" and action == "plan":
+        return "goal.plan"
+    if command == "drive":
+        return "drive"
+    return None
+
+
+def _human_control_action(args) -> str | None:
+    command = getattr(args, "command", None)
+    action = getattr(args, "action", None)
+    if command == "submit":
+        return "submit"
+    if command == "plan" and action in ("confirm", "reject"):
+        return f"plan.{action}"
+    if command == "decision" and action == "answer":
+        return "decision.answer"
+    if command == "automation" and action in ("enable", "disable"):
+        return f"automation.{action}"
+    if command in ("reset", "archive", "repair", "init", "new"):
+        return command
+    if command == "goal" and action == "start":
+        return "goal.start"
+    return None
+
+
+def _require_machine_lease(project: str, args) -> None:
+    operation = _machine_write_action(args)
+    data = load_protocol(project)
+    if not leases.is_strict(data):
+        return
+    control = _human_control_action(args)
+    if control and os.environ.get(leases.TOKEN_ENV):
+        raise leases.LeaseDenied(f"worker lease cannot authorize human control operation {control}")
+    if not operation:
+        return
+    if operation in ("task.start", "drive"):
+        raise leases.LeaseDenied(
+            f"{operation} is not an execution entry in strict mode; submit work and let the scheduler issue a lease"
+        )
+    state = load_state(project)
+    leases.validate(CONFIG_DIR, project, state, data)
+
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 def main():
@@ -2495,6 +2628,17 @@ def main():
     review_sub = review_parser.add_subparsers(dest="action", required=True)
     review_reject = review_sub.add_parser("reject")
     review_reject.add_argument("--reason", required=True)
+
+    decision_parser = sub.add_parser("decision", help="Pause for or answer a bounded human decision")
+    decision_sub = decision_parser.add_subparsers(dest="action", required=True)
+    decision_request = decision_sub.add_parser("request")
+    decision_request.add_argument("--summary", required=True)
+    decision_request.add_argument("--option", action="append", required=True)
+    decision_request.add_argument("--recommended")
+    decision_answer = decision_sub.add_parser("answer")
+    decision_answer.add_argument("--choice", required=True)
+    decision_answer.add_argument("--note")
+    decision_sub.add_parser("status")
 
     automation_parser = sub.add_parser("automation", help="Enable, disable, or inspect unattended execution")
     automation_sub = automation_parser.add_subparsers(dest="action", required=True)
@@ -2762,6 +2906,22 @@ def main():
 
     project = args.project
 
+    try:
+        _require_machine_lease(project, args)
+    except leases.LeaseDenied as exc:
+        leases.audit(
+            CONFIG_DIR, project, "lease_denied",
+            operation=_machine_write_action(args), detail=str(exc),
+        )
+        print(json.dumps({
+            "success": False,
+            "status": "lease_denied",
+            "project": project,
+            "operation": _machine_write_action(args),
+            "detail": str(exc),
+        }, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(3)
+
     if args.command == "bind-tab":
         cmd_bind_tab(project, args.tab, args.name)
         return
@@ -2782,6 +2942,8 @@ def main():
         cmd_plan(project, args)
     elif args.command == "review":
         cmd_review(project, args)
+    elif args.command == "decision":
+        cmd_decision(project, args)
     elif args.command == "automation":
         cmd_automation(project, args)
     elif args.command == "task":

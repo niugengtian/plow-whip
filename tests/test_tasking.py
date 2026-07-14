@@ -115,6 +115,20 @@ class TaskingTest(unittest.TestCase):
         self.assertEqual(payload["task"]["cli_sessions"]["cursor_cli"]["session_id"], "cursor-1")
         self.assertEqual(payload["workflow"]["queue"][0]["cli_sessions"], {})
 
+    def test_decision_request_revokes_execution_and_answer_resumes_same_task(self):
+        state = af.load_state("P")
+        state["task"].update({"placeholder": False, "status": "active"})
+        state["workflow"] = {"id": "T-X", "status": "active", "source": "current_session"}
+        af.save_state("P", state)
+        requested = tasking.request_decision(
+            "P", "Choose storage", ["SQLite", "PostgreSQL"], "SQLite",
+        )
+        self.assertEqual(requested["task"]["status"], "blocked_waiting_human")
+        answered = tasking.answer_decision("P", "1", "small local workload")
+        self.assertEqual(answered["decision"]["choice"], "SQLite")
+        self.assertEqual(answered["task"]["status"], "active")
+        self.assertIn(answered["decision"]["id"], answered["task"]["decision_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

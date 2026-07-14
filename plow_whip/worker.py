@@ -77,7 +77,7 @@ def run(project: str, agent: str, driver: str, task_id: str, dispatch_id: str) -
         return {"success": False, "status": "stale_worker", "detail": "task changed before worker start"}
     prompt = build_drive_prompt(
         project, agent, task.get("next_action") or task.get("title", ""),
-        requested_by="plow-whip-supervisor", project_path=af.project_dir(project), dispatch_id=dispatch_id,
+        requested_by="plow-whip-supervisor", project_path=af.task_workspace(project, state), dispatch_id=dispatch_id,
     )
     result = dispatch(
         agent, project, prompt, force_channel=driver, dispatch_id=dispatch_id, task_id=task_id,

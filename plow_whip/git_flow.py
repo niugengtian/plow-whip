@@ -30,6 +30,54 @@ def _branch_name(task_id: str) -> str:
     return f"plow/{slug}"[:120].rstrip("-")
 
 
+def workspace_path(config_dir: str, project: str, task_id: str) -> str:
+    project_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", project).strip("-") or "project"
+    task_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", task_id).strip("-") or "task"
+    return os.path.join(config_dir, "worktrees", project_slug, task_slug)
+
+
+def prepare_workspace(
+    project_path: str,
+    workspace: str,
+    task_id: str,
+    target_branch: str = "main",
+) -> dict:
+    """Create or resume one linked worktree without switching the control checkout."""
+    if not is_repository(project_path):
+        raise GitFlowBlocked("project is not a Git repository")
+    dirty = _non_runtime_changes(project_path)
+    if dirty:
+        raise GitFlowBlocked(f"control checkout has unrelated changes: {', '.join(dirty[:5])}")
+    branch = _branch_name(task_id)
+    _run(project_path, "fetch", "origin", target_branch)
+    remote_ref = f"origin/{target_branch}"
+    base = _run(project_path, "rev-parse", remote_ref).stdout.strip()
+    if os.path.isdir(workspace):
+        current = _run(workspace, "branch", "--show-current", check=False).stdout.strip()
+        if current != branch:
+            raise GitFlowBlocked(f"task workspace expected branch {branch}, found {current or '(invalid)'}")
+        _run(project_path, "config", "extensions.worktreeConfig", "true")
+        _run(workspace, "config", "--worktree", "remote.origin.pushurl", "disabled://plow-whip-worker")
+        return {
+            "branch": branch, "target_branch": target_branch, "base_commit": base,
+            "workspace_ref": os.path.basename(os.path.dirname(workspace)) + "/" + os.path.basename(workspace),
+            "resumed": True,
+        }
+    os.makedirs(os.path.dirname(workspace), exist_ok=True)
+    exists = _run(project_path, "show-ref", "--verify", f"refs/heads/{branch}", check=False).returncode == 0
+    if exists:
+        _run(project_path, "worktree", "add", workspace, branch)
+    else:
+        _run(project_path, "worktree", "add", "-b", branch, workspace, remote_ref)
+    _run(project_path, "config", "extensions.worktreeConfig", "true")
+    _run(workspace, "config", "--worktree", "remote.origin.pushurl", "disabled://plow-whip-worker")
+    return {
+        "branch": branch, "target_branch": target_branch, "base_commit": base,
+        "workspace_ref": os.path.basename(os.path.dirname(workspace)) + "/" + os.path.basename(workspace),
+        "resumed": exists,
+    }
+
+
 def _non_runtime_changes(project_path: str) -> list[str]:
     result = _run(project_path, "status", "--porcelain", check=True)
     changed = []
@@ -39,6 +87,12 @@ def _non_runtime_changes(project_path: str) -> list[str]:
             continue
         changed.append(path)
     return changed
+
+
+def unexpected_control_changes(project_path: str) -> list[str]:
+    if not is_repository(project_path):
+        return []
+    return _non_runtime_changes(project_path)
 
 
 def prepare_branch(project_path: str, task_id: str, target_branch: str = "main") -> dict:
@@ -70,6 +124,80 @@ def _stage_project_changes(project_path: str) -> None:
     for runtime_path in ("collab", ".plow-whip"):
         if os.path.exists(os.path.join(project_path, runtime_path)):
             _run(project_path, "restore", "--staged", "--", runtime_path, check=False)
+
+
+def checkpoint_branch(project_path: str, task_id: str, git_state: dict, message: str | None = None) -> str:
+    """Commit an implementation checkpoint before independent review starts."""
+    branch = git_state.get("branch") or _branch_name(task_id)
+    current = _run(project_path, "branch", "--show-current").stdout.strip()
+    if current != branch:
+        raise GitFlowBlocked(f"expected task branch {branch}, found {current or '(detached)'}")
+    _stage_project_changes(project_path)
+    staged = _run(project_path, "diff", "--cached", "--quiet", check=False)
+    if staged.returncode == 1:
+        identity = _run(project_path, "config", "user.email", check=False).stdout.strip()
+        prefix = [] if identity else ["-c", "user.name=plow-whip", "-c", "user.email=plow-whip@local"]
+        _run(project_path, *prefix, "commit", "-m", message or f"feat: checkpoint {task_id}")
+    elif staged.returncode != 0:
+        raise GitFlowBlocked("unable to inspect staged implementation changes")
+    return _run(project_path, "rev-parse", "HEAD").stdout.strip()
+
+
+def assert_review_commit(project_path: str, expected_commit: str) -> None:
+    head = _run(project_path, "rev-parse", "HEAD").stdout.strip()
+    if not expected_commit or head != expected_commit:
+        raise GitFlowBlocked(
+            f"reviewed commit changed: expected {expected_commit[:12] if expected_commit else '(missing)'}, found {head[:12]}"
+        )
+    dirty = _non_runtime_changes(project_path)
+    if dirty:
+        raise GitFlowBlocked(f"reviewer changed task files: {', '.join(dirty[:5])}")
+
+
+def publish_reviewed(
+    project_path: str,
+    task_id: str,
+    git_state: dict,
+    expected_commit: str,
+    auto_merge: bool = False,
+    publisher_path: str | None = None,
+) -> dict:
+    """Push the accepted task branch; update the target only when explicitly enabled."""
+    assert_review_commit(project_path, expected_commit)
+    branch = git_state.get("branch") or _branch_name(task_id)
+    target = git_state.get("target_branch") or "main"
+    publisher = publisher_path or project_path
+    _run(publisher, "push", "origin", f"{expected_commit}:refs/heads/{branch}")
+    result = {
+        "status": "published", "branch": branch, "target_branch": target,
+        "commit": expected_commit, "pushed": True, "merged": False,
+    }
+    if not auto_merge:
+        return {**result, "status": "awaiting_human_merge"}
+    _run(publisher, "fetch", "origin", target)
+    remote_target = _run(publisher, "rev-parse", f"origin/{target}").stdout.strip()
+    ancestor = _run(publisher, "merge-base", "--is-ancestor", remote_target, expected_commit, check=False)
+    if ancestor.returncode != 0:
+        return {**result, "status": "awaiting_human_merge", "reason": f"origin/{target} moved"}
+    pushed = _run(publisher, "push", "origin", f"{expected_commit}:refs/heads/{target}", check=False)
+    if pushed.returncode != 0:
+        return {
+            **result, "status": "awaiting_human_merge",
+            "reason": (pushed.stderr or pushed.stdout).strip()[-500:],
+        }
+    return {**result, "status": "delivered", "merged": True}
+
+
+def remote_contains(project_path: str, target_branch: str, commit: str) -> bool:
+    if not commit:
+        return False
+    fetched = _run(project_path, "fetch", "origin", target_branch, check=False)
+    if fetched.returncode != 0:
+        return False
+    contained = _run(
+        project_path, "merge-base", "--is-ancestor", commit, f"origin/{target_branch}", check=False,
+    )
+    return contained.returncode == 0
 
 
 def finalize_fast_forward(project_path: str, task_id: str, git_state: dict, message: str | None = None) -> dict:
