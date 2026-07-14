@@ -12,6 +12,48 @@ class GitFlowBlocked(RuntimeError):
     """A condition that requires human resolution instead of automatic rebase."""
 
 
+RELEASE_E2E_REPOSITORY = "niugengtian/plow-whip-e2e"
+RELEASE_E2E_FIXTURE = "stable-minimal-task"
+RELEASE_E2E_FLOW = [
+    "submit", "scheduler claim", "implementation", "controlled writeback",
+    "two reviews", "push", "fast-forward", "done",
+]
+
+
+def release_gate_required(project_path: str, git_state: dict) -> bool:
+    """Gate only an explicitly marked plow-whip release branch targeting main."""
+    return bool(
+        os.path.basename(os.path.abspath(project_path)) == "plow-whip"
+        and git_state.get("release_branch")
+        and (git_state.get("target_branch") or "main") == "main"
+    )
+
+
+def validate_release_gate(report: dict) -> None:
+    """Validate local and GitHub evidence immediately before final merge."""
+    if report.get("startup_tokens", 10**9) > 600:
+        raise GitFlowBlocked("release gate: startup budget exceeds 600 tokens")
+    if report.get("recovery_tokens", 10**9) > 300:
+        raise GitFlowBlocked("release gate: recovery budget exceeds 300 tokens")
+    if report.get("reviewers") != 2 or report.get("adjudications", 0) > 1:
+        raise GitFlowBlocked("release gate: fixed two-review/adjudication policy not satisfied")
+    e2e = report.get("github_e2e") or {}
+    if e2e.get("repository") != RELEASE_E2E_REPOSITORY or e2e.get("fixture") != RELEASE_E2E_FIXTURE:
+        raise GitFlowBlocked("release gate: wrong GitHub E2E repository or fixture")
+    if not e2e.get("success") or e2e.get("mutated_main"):
+        raise GitFlowBlocked("release gate: GitHub E2E did not complete safely")
+    if e2e.get("implementation") != "simple-tasker":
+        raise GitFlowBlocked("release gate: GitHub E2E did not use simple-tasker")
+    if e2e.get("reviews") != ["codex_cli", "cursor_cli"]:
+        raise GitFlowBlocked("release gate: GitHub E2E reviewers are incomplete")
+    if not e2e.get("fallback_configured"):
+        raise GitFlowBlocked("release gate: CLI failover was not configured")
+    if e2e.get("flow") != RELEASE_E2E_FLOW:
+        raise GitFlowBlocked("release gate: GitHub E2E flow evidence is incomplete")
+    if not e2e.get("temporary_branches_deleted"):
+        raise GitFlowBlocked("release gate: temporary GitHub E2E branches remain")
+
+
 def _run(project_path: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(
         ["git", *args], cwd=project_path, capture_output=True, text=True, check=False,
@@ -184,9 +226,11 @@ def publish_reviewed(
 ) -> dict:
     """Push the accepted task branch; update the target only when explicitly enabled."""
     assert_review_commit(project_path, expected_commit)
+    publisher = publisher_path or project_path
+    if release_gate_required(publisher, git_state):
+        validate_release_gate(git_state.get("release_gate_report") or {})
     branch = git_state.get("branch") or _branch_name(task_id)
     target = git_state.get("target_branch") or "main"
-    publisher = publisher_path or project_path
     _run(publisher, "push", "origin", f"{expected_commit}:refs/heads/{branch}")
     result = {
         "status": "published", "branch": branch, "target_branch": target,

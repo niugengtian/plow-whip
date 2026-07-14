@@ -13,6 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import plow_whip.agent_flow as af
+from plow_whip import leases, protocol
 from plow_whip.whip import (
     STALE_THRESHOLD_MINUTES,
     _is_stale,
@@ -296,6 +297,14 @@ class TestCmdWhip(WhipTestBase):
 
     def test_tampered_strict_project_is_isolated_from_supervisor(self):
         af.cmd_init("Tampered")
+        with open(af.state_file("Tampered"), encoding="utf-8") as handle:
+            unsigned = json.load(handle)
+        data = af.load_protocol("Tampered")
+        data["enforcement"]["reserved_hardening"]["state_hmac"] = True
+        protocol.save(af.project_dir("Tampered"), data)
+        leases.sign_state(af.CONFIG_DIR, "Tampered", unsigned, data)
+        with open(af.state_file("Tampered"), "w", encoding="utf-8") as handle:
+            json.dump(unsigned, handle)
         with open(af.state_file("Tampered"), encoding="utf-8") as handle:
             state = json.load(handle)
         state["next_action"] = "unsigned mutation"

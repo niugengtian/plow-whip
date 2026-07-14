@@ -20,6 +20,11 @@ from datetime import datetime, timedelta
 TOKEN_ENV = "PLOW_WHIP_LEASE_TOKEN"
 LEASE_VERSION = 1
 DEFAULT_TTL_SECONDS = 2400
+RESERVED_HARDENING_DEFAULTS = {
+    "state_hmac": False,
+    "protocol_authority_pin": False,
+    "native_parent_chain": False,
+}
 
 
 class LeaseDenied(RuntimeError):
@@ -36,6 +41,19 @@ class ProtocolIntegrityError(StateIntegrityError):
 
 def is_strict(protocol: dict) -> bool:
     return (protocol.get("enforcement") or {}).get("mode") == "strict"
+
+
+def hardening_enabled(protocol: dict, name: str) -> bool:
+    """Return whether an optional same-user hardening layer is enabled.
+
+    These implementations remain available for deployments that explicitly
+    want them, but they are intentionally outside the default unattended hot
+    path. Signed execution leases are not optional and do not use this gate.
+    """
+    if name not in RESERVED_HARDENING_DEFAULTS:
+        raise ValueError(f"unknown reserved hardening layer: {name}")
+    configured = (protocol.get("enforcement") or {}).get("reserved_hardening") or {}
+    return bool(configured.get(name, RESERVED_HARDENING_DEFAULTS[name]))
 
 
 def protocol_epoch(protocol: dict) -> str:
@@ -167,7 +185,7 @@ def pin_protocol(
     new_incarnation: bool = False,
 ) -> None:
     """Persist a local authority pin before a strict project can execute."""
-    if not is_strict(protocol):
+    if not is_strict(protocol) or not hardening_enabled(protocol, "protocol_authority_pin"):
         return
     path = _protocol_pin_path(config_dir, project, protocol_epoch(protocol))
     if os.path.exists(path):
@@ -185,6 +203,7 @@ def pin_protocol(
         raise ProtocolIntegrityError("strict protocol cannot be pinned without protocol_epoch")
     record = {
         **payload,
+        "reserved_hardening_enabled": True,
         "signature": hmac.new(_secret(config_dir), _canonical(payload), hashlib.sha256).hexdigest(),
     }
     if not _write_protocol_pin(path, record):
@@ -196,6 +215,14 @@ def pin_protocol(
 
 def verify_protocol(config_dir: str, project: str, protocol: dict) -> None:
     """Reject strict-mode downgrade or epoch replacement using a project-external pin."""
+    if not hardening_enabled(protocol, "protocol_authority_pin"):
+        try:
+            with open(_legacy_protocol_pin_path(config_dir, project), encoding="utf-8") as handle:
+                explicitly_pinned = bool(json.load(handle).get("reserved_hardening_enabled"))
+        except (OSError, json.JSONDecodeError):
+            explicitly_pinned = False
+        if not explicitly_pinned:
+            return
     path = _protocol_pin_path(config_dir, project, protocol_epoch(protocol))
     if not os.path.exists(path):
         legacy_path = _legacy_protocol_pin_path(config_dir, project)
@@ -346,7 +373,8 @@ def revoke(task: dict, reason: str) -> None:
             "reason": reason[:300],
         })
     if execution.get("status") in ("starting", "running"):
-        execution["status"] = "revoked"
+        execution["status"] = "stopping"
+        execution["stop_requested_at"] = datetime.now().isoformat(timespec="seconds")
 
 
 def _unsigned_state(state: dict) -> dict:
@@ -354,7 +382,7 @@ def _unsigned_state(state: dict) -> dict:
 
 
 def sign_state(config_dir: str, project: str, state: dict, protocol: dict) -> None:
-    if not is_strict(protocol):
+    if not is_strict(protocol) or not hardening_enabled(protocol, "state_hmac"):
         state.pop("integrity", None)
         return
     payload = {
@@ -372,7 +400,7 @@ def sign_state(config_dir: str, project: str, state: dict, protocol: dict) -> No
 
 
 def verify_state(config_dir: str, project: str, state: dict, protocol: dict) -> None:
-    if not is_strict(protocol):
+    if not is_strict(protocol) or not hardening_enabled(protocol, "state_hmac"):
         return
     integrity = state.get("integrity") or {}
     supplied = integrity.get("signature")

@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import plow_whip.agent_flow as af
+from plow_whip import leases, protocol
 from plow_whip.agent_flow import (
     cmd_agent,
     cmd_configure,
@@ -224,6 +225,14 @@ class TestDoctor(PlowWhipTestBase):
 
     def test_doctor_quarantines_unsigned_state_tampering(self):
         cmd_init("TestProject")
+        with open(af.state_file("TestProject"), encoding="utf-8") as f:
+            unsigned = json.load(f)
+        data = af.load_protocol("TestProject")
+        data["enforcement"]["reserved_hardening"]["state_hmac"] = True
+        protocol.save(af.project_dir("TestProject"), data)
+        leases.sign_state(af.CONFIG_DIR, "TestProject", unsigned, data)
+        with open(af.state_file("TestProject"), "w", encoding="utf-8") as f:
+            json.dump(unsigned, f)
         with open(af.state_file("TestProject"), encoding="utf-8") as f:
             state = json.load(f)
         state["next_action"] = "wrong duplicate"

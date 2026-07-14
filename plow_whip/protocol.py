@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import secrets
+import re
 
 from .io_utils import atomic_write_json, atomic_write_text
 
@@ -46,7 +47,10 @@ DEFAULT_ORCHESTRATION = {
     "circuit_recovery_successes": 3,
     "lease_ttl_seconds": 2400,
     "auto_merge_protected": False,
+    "reviewers": 2,
+    "max_adjudications": 1,
 }
+OPTIONAL_RUNTIME_DEFAULTS = {"reviewers", "max_adjudications"}
 
 
 def normalize_role(value: str) -> str:
@@ -237,6 +241,40 @@ def compiled_rules(data: dict, agent: str, task: dict | None = None) -> dict:
     }
 
 
+RULE_ACTIONS = {
+    "R001": "enter_via_start",
+    "R002": "move_deletions_to_by_rm",
+    "R003": "stay_inside_project_root",
+    "R004": "do_not_spawn_unapproved_subagents",
+    "R005": "write_state_via_plow_commands",
+    "R009": "verify_code_before_delivery",
+    "R010": "require_current_execution_lease",
+}
+
+
+def compact_rules(data: dict, agent: str, task: dict | None = None, limit: int = 8) -> list[dict]:
+    """Compile a bounded machine-action rule list for model startup context."""
+    compiled = compiled_rules(data, agent, task)
+    rows = compiled["mandatory_rules"] + compiled["important_rules"]
+    # Project rules win when the prompt budget cannot carry every rule. Lease,
+    # PID, Git, and state checks remain locally enforced even when omitted.
+    rows.sort(key=lambda item: (item.get("scope") != "project", item.get("id", "")))
+    result = []
+    for item in rows[:max(0, limit)]:
+        action = RULE_ACTIONS.get(item["id"])
+        if not action:
+            action = "_".join(
+                part for part in re.sub(r"[^a-z0-9]+", "_", item.get("summary", "").lower()).split("_")
+                if part
+            )[:80] or "follow_rule"
+        result.append({
+            "id": item["id"],
+            "action": action,
+            "on_violation": "stop" if item.get("enforcement") == "block" else "block",
+        })
+    return result
+
+
 def protocol_path(project_dir: str) -> str:
     return os.path.join(project_dir, "collab", PROTOCOL_NAME)
 
@@ -254,6 +292,11 @@ def default_protocol(project: str, agents: list[str], agent_meta: dict | None = 
             "mode": "strict",
             "protocol_epoch": secrets.token_hex(16),
             "control_plane": "codex",
+            "reserved_hardening": {
+                "state_hmac": False,
+                "protocol_authority_pin": False,
+                "native_parent_chain": False,
+            },
         },
         "global_rules": {rule_id: normalize_rule(rule_id, rule, "global") for rule_id, rule in GLOBAL_RULES.items()},
         "project_rules": {},
@@ -379,7 +422,10 @@ def semantic_issues(data: dict) -> list[str]:
     ]
     if unnormalized_project_rules:
         issues.append("project rules need normalization: " + ", ".join(unnormalized_project_rules))
-    missing_defaults = [key for key in DEFAULT_ORCHESTRATION if key not in data.get("orchestration", {})]
+    missing_defaults = [
+        key for key in DEFAULT_ORCHESTRATION
+        if key not in OPTIONAL_RUNTIME_DEFAULTS and key not in data.get("orchestration", {})
+    ]
     if missing_defaults:
         issues.append("protocol defaults missing: orchestration." + ", orchestration.".join(missing_defaults))
     enforcement = data.get("enforcement")

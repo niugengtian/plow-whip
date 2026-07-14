@@ -128,22 +128,15 @@ class ProtocolSchedulerTest(unittest.TestCase):
     def test_start_pack_is_bounded_and_complete(self):
         pack = af.build_start_pack("P", "codex")
         self.assertTrue(pack["ready"])
-        self.assertEqual(pack["authorization"]["mode"], "observer")
-        self.assertFalse(pack["authorization"]["execution_allowed"])
-        self.assertNotIn("writeback", pack)
+        self.assertEqual(pack["auth"]["mode"], "observer")
+        self.assertFalse(pack["auth"]["execution_allowed"])
+        self.assertNotIn("commands", pack)
         self.assertEqual(pack["task"]["id"], "T-001")
-        self.assertIn("R001", [r["id"] for r in pack["mandatory_rules"]])
-        self.assertNotIn("R006", [r["id"] for r in pack["important_rules"]])
-        self.assertTrue(pack["rules_meta"]["effective_hash"])
-        for rule in pack["mandatory_rules"] + pack["important_rules"]:
-            self.assertIn(rule["scope"], ("global", "project"))
-            self.assertIn(rule["priority"], ("required", "important"))
-            self.assertEqual(rule["origin"], "derived")
-            self.assertTrue(rule["derived_from"])
-            self.assertIn(rule["enforcement"], ("block", "require_approval", "verify", "warn", "inform"))
-        self.assertNotIn("next_action_file_excerpt", pack)
-        self.assertNotIn("rules", pack)
-        self.assertLessEqual(pack["rules_meta"]["startup_payload_chars"], af.START_PACK_MAX_CHARS)
+        self.assertIn("R001", [r["id"] for r in pack["rules"]])
+        self.assertLessEqual(len(pack["rules"]), 8)
+        for rule in pack["rules"]:
+            self.assertEqual(set(rule), {"id", "action", "on_violation"})
+        self.assertLessEqual(pack["budget"]["estimated_tokens"], af.START_PACK_NORMAL_TOKENS)
 
     def test_scheduler_lease_turns_exact_owner_into_worker(self):
         state = af.load_state("P")
@@ -154,9 +147,9 @@ class ProtocolSchedulerTest(unittest.TestCase):
         self.assertNotIn(claim["lease_token"], json.dumps(af.load_state("P"), ensure_ascii=False))
         with patch.dict(os.environ, {leases.TOKEN_ENV: claim["lease_token"]}):
             pack = af.build_start_pack("P", "codex_cli")
-            self.assertEqual(pack["authorization"]["mode"], "worker")
-            self.assertTrue(pack["authorization"]["execution_allowed"])
-            self.assertIn("writeback", pack)
+            self.assertEqual(pack["auth"]["mode"], "worker")
+            self.assertTrue(pack["auth"]["execution_allowed"])
+            self.assertIn("commands", pack)
             af._require_machine_lease("P", FakeArgs(command="task", action="progress"))
             with self.assertRaisesRegex(leases.LeaseDenied, "human control"):
                 af._require_machine_lease("P", FakeArgs(command="plan", action="confirm"))
@@ -291,6 +284,9 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def test_protocol_authority_pin_rejects_strict_mode_downgrade(self):
         data = af.load_protocol("P")
+        data["enforcement"]["reserved_hardening"]["protocol_authority_pin"] = True
+        protocol.save(af.project_dir("P"), data)
+        leases.pin_protocol(af.CONFIG_DIR, "P", data, new_incarnation=True)
         data.pop("enforcement")
         protocol.save(af.project_dir("P"), data)
 
@@ -302,6 +298,9 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def test_legacy_authority_pin_is_migrated_without_losing_enforcement(self):
         data = af.load_protocol("P")
+        data["enforcement"]["reserved_hardening"]["protocol_authority_pin"] = True
+        protocol.save(af.project_dir("P"), data)
+        leases.pin_protocol(af.CONFIG_DIR, "P", data, new_incarnation=True)
         current = leases._protocol_pin_path(af.CONFIG_DIR, "P", leases.protocol_epoch(data))
         legacy = leases._legacy_protocol_pin_path(af.CONFIG_DIR, "P")
         os.replace(current, legacy)
@@ -331,10 +330,10 @@ class ProtocolSchedulerTest(unittest.TestCase):
         pack = af.build_start_pack("P", "codex")
 
         self.assertTrue(pack["ready"])
-        self.assertTrue(pack["task"]["title_truncated"])
-        self.assertTrue(pack["task"]["next_action_truncated"])
-        self.assertEqual(len(pack["task"]["acceptance"]), 10)
-        self.assertLessEqual(pack["rules_meta"]["startup_payload_chars"], af.START_PACK_MAX_CHARS)
+        self.assertLessEqual(len(pack["task"]["title"]), 96)
+        self.assertLessEqual(len(pack["task"]["next"]), 196)
+        self.assertLessEqual(len(pack["task"]["acceptance"]), 2)
+        self.assertLessEqual(pack["budget"]["estimated_tokens"], af.START_PACK_NORMAL_TOKENS)
 
     def test_planning_catalog_size_does_not_grow_with_agent_count(self):
         data = af.load_protocol("P")
@@ -363,10 +362,9 @@ class ProtocolSchedulerTest(unittest.TestCase):
         state["task"]["rule_tags"] = ["deploy"]
         af.save_state("P", state)
         builder = af.build_start_pack("P", "builder")
-        self.assertNotIn("P-agent", [r["id"] for r in codex["important_rules"]])
-        self.assertNotIn("P-agent", [r["id"] for r in builder_without_tag["important_rules"]])
-        self.assertIn("P-agent", [r["id"] for r in builder["important_rules"]])
-        self.assertEqual(builder["required_context"][0]["rule_id"], "P-agent")
+        self.assertNotIn("P-agent", [r["id"] for r in codex["rules"]])
+        self.assertNotIn("P-agent", [r["id"] for r in builder_without_tag["rules"]])
+        self.assertIn("P-agent", [r["id"] for r in builder["rules"]])
 
     def test_rule_compilation_uses_untruncated_task_tags(self):
         data = af.load_protocol("P")
@@ -382,8 +380,8 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
         pack = af.build_start_pack("P", "codex")
 
-        self.assertIn("P-late", [rule["id"] for rule in pack["important_rules"]])
-        self.assertNotIn("late-tag", pack["task"]["rule_tags"])
+        self.assertIn("P-late", [rule["id"] for rule in pack["rules"]])
+        self.assertNotIn("rule_tags", pack["task"])
 
     def test_task_command_updates_single_runtime_truth(self):
         af.cmd_task("P", FakeArgs(action="start", task_id="T-9", title="Build", owner="builder", next="Code", decisions=["D-1"], json=False))
@@ -436,8 +434,6 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def _save_git_delivery_blocker(self):
         data = af.load_protocol("P")
-        os.unlink(leases._protocol_pin_path(af.CONFIG_DIR, "P", leases.protocol_epoch(data)))
-        os.unlink(leases._legacy_protocol_pin_path(af.CONFIG_DIR, "P"))
         data.pop("enforcement", None)
         protocol.save(af.project_dir("P"), data)
         state = af.load_state("P")
@@ -712,20 +708,20 @@ class ProtocolSchedulerTest(unittest.TestCase):
 
     def test_task_completion_archives_cli_sessions(self):
         state = af.load_state("P")
-        state["task"]["cli_sessions"] = {
-            "cursor_cli": {"session_id": "cursor-1", "status": "active"},
-            "codex_cli": {"session_id": "codex-1", "status": "active"},
+        state["task"]["active_session"] = {
+            "agent": "codex_cli", "session_id": "codex-1", "status": "active",
         }
         state["task"]["blockers"] = ["old blocker"]
         af.save_state("P", state)
         af.cmd_task("P", FakeArgs(action="complete", output="Done", next=None, json=False))
         task = af.load_state("P")["task"]
         self.assertEqual(task["blockers"], [])
-        self.assertTrue(all(item["status"] == "archived" for item in task["cli_sessions"].values()))
+        self.assertIsNone(task["active_session"])
+        self.assertEqual(task["session_archive"][0]["status"], "archived")
         archive = os.path.join(self.projects, "P", "collab", "memory", "sessions", "T-001_cli_sessions.json")
         self.assertTrue(os.path.exists(archive))
         with open(archive, encoding="utf-8") as f:
-            self.assertEqual(json.load(f)["cli_sessions"]["cursor_cli"]["session_id"], "cursor-1")
+            self.assertEqual(json.load(f)["sessions"][0]["session_id"], "codex-1")
 
     def test_scheduler_renders_three_native_formats(self):
         mac = scheduler.render(self.config, system="Darwin")

@@ -237,30 +237,34 @@ def _dispatch_zellij(prompt: str, project: str, target_tab: int = None) -> dict:
 def _task_marker(state: dict) -> str:
     task = dict(state.get("task", {}))
     task.pop("cli_sessions", None)
+    task.pop("active_session", None)
+    task.pop("session_archive", None)
+    task.pop("recovery", None)
     task.pop("execution", None)
     task.pop("attempts", None)
     return json.dumps(task, ensure_ascii=False, sort_keys=True)
 
 
 def _existing_cli_session(project: str, agent: str) -> dict | None:
-    return af.load_state(project).get("task", {}).get("cli_sessions", {}).get(agent)
+    session = af.load_state(project).get("task", {}).get("active_session") or {}
+    return session if session.get("agent") == agent and session.get("status") == "active" else None
 
 
 def _record_cli_session(project: str, agent: str, session_id: str, route: dict | None = None) -> dict:
-    """Persist one CLI-generated session ID per task and CLI."""
+    """Persist the Task's single active CLI session."""
     for _ in range(3):
         state = af.load_state(project)
         task = state.setdefault("task", {})
-        sessions = task.setdefault("cli_sessions", {})
-        existing = sessions.get(agent)
+        existing = task.get("active_session") or None
         if existing:
             if existing.get("session_id") != session_id:
                 raise RuntimeError(
-                    f"task {task.get('id')} already owns {agent} session {existing.get('session_id')}"
+                    f"task {task.get('id')} already owns active session {existing.get('session_id')}"
                 )
             return existing
-        sessions[agent] = {
+        task["active_session"] = {
             "session_id": session_id,
+            "agent": agent,
             "status": "active",
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "auth_profile": (route or {}).get("name", "desktop"),
@@ -269,7 +273,7 @@ def _record_cli_session(project: str, agent: str, session_id: str, route: dict |
         task.setdefault("execution", {})["session_id"] = session_id
         try:
             af.save_state(project, state)
-            return sessions[agent]
+            return task["active_session"]
         except RuntimeError:
             continue
     raise RuntimeError(f"could not persist {agent} session after concurrent state updates")
@@ -751,14 +755,20 @@ def _dispatch_simple_tasker(agent: str, prompt: str, project: str) -> dict:
         }
     state = af.load_state(project)
     if state.get("task", {}).get("id") == task_id:
-        session = state["task"].setdefault("cli_sessions", {}).setdefault("simple_tasker", {})
+        session = state["task"].get("active_session") or {}
+        if session and session.get("session_id") != result.get("session_id"):
+            raise RuntimeError(
+                f"task {task_id} already owns active session {session.get('session_id')}"
+            )
         session.update({
+            "agent": "simple-tasker",
             "session_id": result.get("session_id"), "status": result.get("status"),
             "created_at": session.get("created_at") or datetime.now().isoformat(timespec="seconds"),
             "key_ref": result.get("key_ref"), "session_file": os.path.relpath(
                 result.get("session_file", runner.session_path), af.project_dir(project)
             ),
         })
+        state["task"]["active_session"] = session
         af.save_state(project, state)
 
     if result.get("status") == "needs_planner":

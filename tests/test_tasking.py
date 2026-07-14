@@ -70,7 +70,10 @@ class TaskingTest(unittest.TestCase):
             confirmed = tasking.confirm_plan("P")
         self.assertEqual(confirmed["workflow"]["status"], "active")
         self.assertEqual(confirmed["task"]["title"], "Build")
-        self.assertEqual(len(confirmed["workflow"]["queue"]), 1)
+        self.assertEqual(len(confirmed["workflow"]["queue"]), 2)
+        self.assertEqual(
+            [item["review_index"] for item in confirmed["workflow"]["queue"]], [1, 2]
+        )
 
     def test_plan_confirmation_revokes_planner_lease_until_fresh_claim(self):
         payload = tasking.submit("P", "给我设计并实现一个完整支付平台")
@@ -120,20 +123,26 @@ class TaskingTest(unittest.TestCase):
         implementation = {
             "id": "T-X", "title": "Build", "owner": "cursor_cli", "status": "done", "stage": "implementation",
             "next_action": "", "acceptance": [], "verify_commands": [], "rule_tags": [], "last_output": "built",
-            "blockers": [], "decision_ids": [], "cli_sessions": {"cursor_cli": {"session_id": "cursor-1"}},
+            "blockers": [], "decision_ids": [],
+            "active_session": {"agent": "cursor_cli", "session_id": "cursor-1", "status": "active"},
         }
         review = {
             "id": "T-X-REVIEW", "title": "Review", "owner": "codex_cli", "status": "active", "stage": "review",
             "next_action": "review", "acceptance": [], "verify_commands": [], "rule_tags": [], "last_output": "",
-            "blockers": [], "decision_ids": [], "cli_sessions": {"codex_cli": {"session_id": "codex-review-1"}},
+            "blockers": [], "decision_ids": [],
+            "active_session": {"agent": "codex_cli", "session_id": "codex-review-1", "status": "active"},
         }
-        state["workflow"] = {"id": "T-X", "status": "active", "queue": [], "last_implementation": implementation}
+        second = {**review, "id": "T-X-REVIEW-2", "owner": "cursor_cli", "active_session": None}
+        state["workflow"] = {
+            "id": "T-X", "status": "active", "queue": [second],
+            "last_implementation": implementation, "candidate_commit": "abc",
+        }
         state["task"] = review
         af.save_state("P", state)
         payload = tasking.reject_review("P", "missing edge case")
-        self.assertEqual(payload["task"]["owner"], "cursor_cli")
-        self.assertEqual(payload["task"]["cli_sessions"]["cursor_cli"]["session_id"], "cursor-1")
-        self.assertEqual(payload["workflow"]["queue"][0]["cli_sessions"], {})
+        self.assertEqual(payload["task"]["id"], "T-X-REVIEW-2")
+        self.assertEqual(payload["task"]["candidate_commit"], "abc")
+        self.assertEqual(payload["workflow"]["review_results"][0]["result"], "block")
 
     def test_decision_request_revokes_execution_and_answer_resumes_same_task(self):
         state = af.load_state("P")

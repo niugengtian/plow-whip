@@ -194,8 +194,8 @@ plow-whip scheduler status
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
 - 新项目默认使用本机人机控制面：macOS 是 Codex Desktop，Linux/Windows 是首次绑定的交互式终端；可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
 - 默认 Cursor Desktop 只是不可调度的观察身份；本版没有它的可信会话授权适配器，因此不能在严格项目中提交、确认或答复决策。Cursor CLI 仍可由 scheduler 持租约执行任务。
-- 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 按项目 incarnation 固定 strict 模式与 `protocol_epoch`，归档后可安全复用项目名，旧版 pin 会自动迁移。状态和日志只保存不可逆 lease ID，不保存 Token。活跃 Worker 的签名租约元数据由 scheduler 续期，长任务无需更换进程环境中的 Token。
-- macOS 的提交、确认和决策权限同时要求绑定 Thread 与可信 Desktop App 进程父链；Linux/Windows 同时要求 TTY 交互性与已绑定终端会话。单独伪造环境变量不能获得控制权。
+- 签名执行租约保持默认启用：状态和日志只保存不可逆 lease ID，不保存 Token；scheduler 可续期活跃租约元数据。状态 HMAC、协议 authority pin 和原生父进程链实现保留在代码中，但默认不调用；只有显式设置 `enforcement.reserved_hardening` 才启用这些同用户加固层。
+- macOS 控制面绑定当前 Codex Desktop Thread；Linux/Windows 绑定第一个交互式终端。旧入口丢失后，新交互终端可显式执行 `desktop rebind`，无需旧终端确认；授权日志同时记录旧、新不可逆引用。该边界防止过期会话和误操作，不防御同一 OS 用户下蓄意恶意的 CLI 进程。
 - Worker worktree 的 push URL 被禁用；发布由 scheduler 父进程从控制 checkout 完成。目标分支自动更新默认关闭，未配置受保护身份时只推送 `plow/*` 分支；人工合并冲突期间保留 `awaiting_human_merge`，推送完成后由 scheduler 自动对账。
 - `blocked` 和 `done` 永不自动派发。任务需要外部凭据、人工审批或产品决策时，应明确 block，而不是绕过边界。
 - API Key/Profile 池只对认证、额度和限流错误切换。网络或服务异常打开对应 CLI 的独立熔断器，不累计 Task 重试；连续三次无 Token 探测成功后自动恢复。
@@ -207,17 +207,19 @@ plow-whip scheduler status
 
 ### 原子状态与并发保护
 
-`task progress|block|complete` 在严格项目中必须同时通过租约签名、Task、Owner、dispatch ID、租约代数、有效期和 `protocol_epoch` 校验。状态继续使用 revision 与原子替换防止旧写入覆盖，并增加 HMAC 完整性签名；直接编辑严格项目的状态会被 doctor 和 scheduler 拒绝。
+`task progress|block|complete` 在严格项目中必须同时通过租约签名、Task、Owner、dispatch ID、租约代数、有效期和 `protocol_epoch` 校验。JSON/schema 与语义校验、revision 冲突检测、原子替换和审计日志保持在默认热路径；状态 HMAC 与 authority pin 属于保留但默认关闭的可选层。
 
 `start` 对无租约会话仍返回有界只读上下文，但标记为 `observer` 且不返回写回命令。旧线程即使保留历史指令，也无法重放过期租约。
 
 ### 有界恢复，不无限烧 token
 
-默认探针只读状态、时间戳、任务 ID、PID、Session、revision 和熔断状态，不加载 skills、协议正文、任务正文、消息或历史。每个 Task 同时只能有一个 Worker；不同 Task 可并发，每种 CLI 默认最多 5 个。实现失败最多重试 3 次；余额、认证、网络和服务故障与实现失败分开计数。
+默认探针只读状态、时间戳、任务 ID、PID、Session、revision、Git 和熔断状态，不消耗模型 token。每个 Task 同时只有一个有效租约、一个 Worker 和一个 `active_session`；旧 Session 只进入 archive。Git-backed recovery snapshot 不依赖 CLI 原始 transcript，可跨会话、跨 CLI、跨电脑继续。`start --json` 使用紧凑英文 JSON，正常预算 600、硬上限 1200 token，规则最多 8 条。
+
+撤销或替换时先立即撤销旧租约并标记 `stopping`，再发送 TERM。scheduler 至少等待 30 秒；进程仍存活才发送 KILL，且 PID 消失前不会启动替代 Worker。会话估算 3000 token 软轮换、4000 token 硬轮换，文件安全阈值 16384 bytes，carry-forward 最多 300 token；完整历史保持 cold、按需读取。
 
 ### 验收驱动推进
 
-任务有验证命令时，只有全部通过才能进入 Reviewer。代码 Workflow 的最后一步必须独立验收，默认选择不同 Driver；只有资源不足时才允许同一 CLI 的不同逻辑 Agent 与全新 Session。Reviewer 拒绝不会自己改代码，而是恢复原执行 Session。
+任务有验证命令时，只有全部通过才能进入 Reviewer。每个候选 SHA 固定两次独立 Review，使用固定 blocking checklist，Reviewer 不修改候选；开放式非阻塞发现进入 backlog。两个结论冲突时只允许一次 adjudication，裁决必须返回 pass 或 block，不进入无限评审循环。
 
 ### Git 交付原子性
 
@@ -427,9 +429,11 @@ collab/
 
 新项目就绪所需的 memory 结构只有 `DECISIONS.md` 和 `sessions/`。旧版 `NEXT_ACTION.md`、`CURRENT_STATUS.md`、`ROADMAP.md` 可保留，但不参与启动和 doctor 就绪判定。
 
-本机私有运行目录还保存 `runtime/authority/lease-secret`、`runtime/authority/protocols/`、授权审计 `logs/authorization.jsonl` 和 `worktrees/<project>/<task>/`。这些文件不进入项目仓库；状态只记录不可逆 lease ID 与相对 `workspace_ref`。严格协议被删除 `enforcement` 或替换 epoch 时，authority pin 会拒绝降级加载。
+本机私有运行目录还保存签名租约密钥、可选 authority pin、控制面绑定、授权审计 `logs/authorization.jsonl` 和 `worktrees/<project>/<task>/`。这些文件不进入项目仓库；状态只记录不可逆 lease ID 与相对 `workspace_ref`。authority pin 只有显式启用保留加固时才参与加载。
 
-规则包含四个维度：`scope=global|project`、`priority=required|important`、`origin=local|inherited|derived`、`enforcement=block|require_approval|verify|warn|inform`。`start --json` 返回全部 mandatory rules，并根据 Agent 和任务 `rule_tags` 返回相关 important rules；只有需要完整细则时才给出定向 `required_context`。`rules_meta.effective_hash` 用于识别规则变化。
+协议规则仍保留 scope、priority、origin、enforcement 四个维度。模型启动包只携带最多 8 条 `{id, action, on_violation}`；租约、PID、scheduler、Git、revision 和状态校验由本地代码执行，不把这些检查折算成 prompt token。
+
+`plow-whip` 自身发布到 `main` 时可显式标记 release branch；只有这一最终合并会触发 release gate。闸门复核 startup/recovery 预算，并要求专用公开仓库 `niugengtian/plow-whip-e2e` 的 `stable-minimal-task` 完成 submit → scheduler claim → implementation → controlled writeback → 两次 review → push → fast-forward → done；临时 target/task 分支成功后删除，测试仓库 `main` 不被修改。
 
 <a id="command-index"></a>
 ## 完整命令索引

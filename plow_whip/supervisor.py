@@ -79,12 +79,14 @@ def _pid_alive(pid: int | None) -> bool:
 
 def execution_is_live(execution: dict, excluding_dispatch: str | None = None) -> bool:
     """Treat a claimed execution as live before its child PID is available."""
-    if execution.get("status") not in ("starting", "running"):
+    if execution.get("status") not in ("starting", "running", "stopping", "revoked"):
         return False
     if excluding_dispatch and execution.get("dispatch_id") == excluding_dispatch:
         return False
     if any(_pid_alive(execution.get(key)) for key in ("cli_pid", "worker_pid")):
         return True
+    if execution.get("status") in ("stopping", "revoked"):
+        return False
     claimed = execution.get("claimed_at") or execution.get("started_at") or execution.get("cli_started_at")
     try:
         claimed_at = datetime.fromisoformat(claimed) if claimed else None
@@ -330,9 +332,10 @@ def _stop_open_circuit_workers(live: list[dict], grace_seconds: int = 30) -> lis
     return actions
 
 
-def _stop_revoked_workers(live: list[dict]) -> list[dict]:
-    """Terminate workers whose task or lease was frozen by a decision/state transition."""
+def _stop_revoked_workers(live: list[dict], grace_seconds: int = 30) -> list[dict]:
+    """Gracefully stop revoked workers, then force-kill on a later scheduler tick."""
     actions = []
+    now = datetime.now()
     for worker in live:
         try:
             state = af.load_state(worker["project"])
@@ -347,16 +350,41 @@ def _stop_revoked_workers(live: list[dict]) -> list[dict]:
             )
             if authorized:
                 continue
+            requested = worker.get("stop_requested_at")
+            try:
+                requested_at = datetime.fromisoformat(requested) if requested else None
+            except ValueError:
+                requested_at = None
+            sig = (
+                signal.SIGKILL
+                if requested_at and now - requested_at >= timedelta(seconds=grace_seconds)
+                else signal.SIGTERM
+            )
             cli_pid = worker.get("cli_pid") or execution.get("cli_pid")
             if cli_pid and int(cli_pid) != int(worker["pid"]) and _pid_alive(cli_pid):
-                os.killpg(int(cli_pid), signal.SIGTERM)
-            os.killpg(int(worker["pid"]), signal.SIGTERM)
+                os.killpg(int(cli_pid), sig)
+            os.killpg(int(worker["pid"]), sig)
+            worker["stop_requested_at"] = requested or now.isoformat(timespec="seconds")
+            if task.get("id") == worker.get("task_id") and execution.get("dispatch_id") == worker.get("dispatch_id"):
+                execution["status"] = "stopping"
+                execution["stop_requested_at"] = worker["stop_requested_at"]
+                task["execution"] = execution
+                state["task"] = task
+                try:
+                    af.save_state(worker["project"], state)
+                except RuntimeError:
+                    pass
             actions.append({
                 "project": worker["project"], "task_id": worker["task_id"],
-                "signal": signal.SIGTERM.name, "reason": "lease_revoked_or_task_frozen",
+                "signal": sig.name, "reason": "lease_revoked_or_task_frozen",
             })
         except (OSError, ValueError, KeyError):
             continue
+    if actions:
+        updated = {item.get("dispatch_id"): item for item in live}
+        _update_registry(lambda registry: registry.update({
+            "workers": [updated.get(item.get("dispatch_id"), item) for item in registry.get("workers", [])]
+        }))
     return actions
 
 

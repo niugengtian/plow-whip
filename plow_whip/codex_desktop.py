@@ -31,6 +31,61 @@ def _environment_thread_id(allow_env: bool) -> str | None:
     return os.environ.get("CODEX_THREAD_ID") or None
 
 
+def _control_identity() -> dict | None:
+    """Identify the current interactive control surface without parent walking."""
+    thread_id = _environment_thread_id(allow_env=True)
+    if thread_id:
+        return {"kind": "codex_desktop", "ref": thread_ref(thread_id)}
+    terminal_id = os.environ.get("PLOW_WHIP_TERMINAL_ID")
+    if not terminal_id:
+        try:
+            terminal_id = os.ttyname(0) if os.isatty(0) else None
+        except OSError:
+            terminal_id = None
+    if terminal_id:
+        return {
+            "kind": "interactive_terminal",
+            "ref": f"sha256:{hashlib.sha256(terminal_id.encode()).hexdigest()}",
+        }
+    return None
+
+
+def bind_control(project: str, *, rebind: bool = False) -> dict:
+    """Bind the first interactive surface or explicitly replace a lost one."""
+    from . import agent_flow as af
+    from . import leases
+
+    identity = _control_identity()
+    if not identity:
+        return {"bound": False, "reason": "no_interactive_control_identity"}
+    checkpoint = _load_checkpoint(project)
+    current = checkpoint.get("control_binding")
+    if not current and checkpoint.get("thread_id"):
+        current = {"kind": "codex_desktop", "ref": thread_ref(checkpoint["thread_id"])}
+    if current == identity:
+        return {"bound": True, "binding": identity, "changed": False}
+    if current and not rebind:
+        return {"bound": False, "reason": "different_control_surface", "binding": current}
+    changed_at = datetime.now().isoformat(timespec="seconds")
+    history = list(checkpoint.get("control_binding_history") or [])
+    if current:
+        history.append({**current, "replaced_at": changed_at, "replaced_by": identity["ref"]})
+    checkpoint.update({
+        "control_binding": identity,
+        "control_binding_history": history[-20:],
+        "control_bound_at": changed_at,
+    })
+    path = _checkpoint_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(str(path) + ".lock"):
+        atomic_write_json(str(path), checkpoint)
+    leases.audit(
+        af.CONFIG_DIR, project, "control_rebound" if current else "control_bound",
+        old_ref=(current or {}).get("ref"), new_ref=identity["ref"], kind=identity["kind"],
+    )
+    return {"bound": True, "binding": identity, "changed": True, "rebound": bool(current)}
+
+
 def _checkpoint_paths(project: str) -> tuple[Path, Path]:
     from . import agent_flow as af
 
@@ -58,17 +113,25 @@ def authorize_control(project: str, *, bind_if_missing: bool = False) -> bool:
     This is an operational boundary against stale or accidental sessions, not
     an OS sandbox against a malicious process running as the same user.
     """
-    thread_id = _environment_thread_id(allow_env=True)
-    if not thread_id:
+    identity = _control_identity()
+    if not identity:
         return False
     checkpoint = _load_checkpoint(project)
+    bound_identity = checkpoint.get("control_binding")
+    if bound_identity:
+        return hmac.compare_digest(
+            json.dumps(bound_identity, sort_keys=True), json.dumps(identity, sort_keys=True)
+        )
+    thread_id = _environment_thread_id(allow_env=True)
     bound = checkpoint.get("thread_id")
     if bound:
-        return hmac.compare_digest(str(bound), thread_id)
+        return bool(thread_id and hmac.compare_digest(str(bound), thread_id))
     if not bind_if_missing:
         return False
-    result = sync(project, allow_env=True)
-    return hmac.compare_digest(str(result.get("thread_ref") or ""), str(thread_ref(thread_id)))
+    result = bind_control(project)
+    if thread_id:
+        sync(project, allow_env=True)
+    return bool(result.get("bound"))
 
 
 def _thread_file(thread_id: str) -> Path | None:
@@ -173,6 +236,7 @@ def _sync(project: str, allow_env: bool = True) -> dict:
 
     synced_at = datetime.now().isoformat(timespec="seconds")
     atomic_write_json(str(_checkpoint_path(project)), {
+        **checkpoint,
         "schema_version": _CHECKPOINT_SCHEMA_VERSION,
         "parser_version": _PARSER_VERSION,
         "thread_id": thread_id,

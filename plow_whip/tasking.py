@@ -165,7 +165,7 @@ def planner_owner(data: dict, preferred: str | None = None) -> str:
     return selected
 
 
-def _review_task(data: dict, root_id: str, title: str, implementation_owner: str) -> dict:
+def _review_candidates(data: dict, implementation_owner: str) -> list[dict]:
     implementation = data.get("agents", {}).get(implementation_owner, {})
     implementation_driver = implementation.get("driver")
     executable_drivers = (
@@ -173,34 +173,61 @@ def _review_task(data: dict, root_id: str, title: str, implementation_owner: str
         if leases.is_strict(data)
         else ("codex_cli", "cursor_cli", "simple_tasker", "zellij")
     )
-    choices = routing.candidates(
+    preferred = routing.candidates(
         data, role="reviewer", capabilities=["review"],
         exclude_agents={implementation_owner}, exclude_drivers={implementation_driver},
         driver_available=lambda driver: driver in executable_drivers,
     )
-    if not choices:
-        choices = routing.candidates(
-            data, role="reviewer", capabilities=["review"], exclude_agents={implementation_owner},
-            driver_available=lambda driver: driver in executable_drivers,
-        )
-    if not choices:
-        choices = routing.candidates(
-            data, role="reviewer", capabilities=["review"],
-            driver_available=lambda driver: driver in executable_drivers,
-        )
+    broader = routing.candidates(
+        data, role="reviewer", capabilities=["review"],
+        driver_available=lambda driver: driver in executable_drivers,
+    )
+    choices = []
+    seen = set()
+    for item in preferred + broader:
+        if item["agent"] not in seen:
+            choices.append(item)
+            seen.add(item["agent"])
     if not choices:
         raise ValueError("no executable reviewer is configured")
-    owner = choices[0]["agent"]
+    return choices
+
+
+def _review_task(
+    data: dict, root_id: str, title: str, implementation_owner: str,
+    index: int = 1, owner: str | None = None, stage: str = "review",
+) -> dict:
+    choices = _review_candidates(data, implementation_owner)
+    owner = owner or choices[(index - 1) % len(choices)]["agent"]
+    suffix = "ADJUDICATION" if stage == "adjudication" else f"REVIEW-{index}"
     return {
-        "id": f"{root_id}-REVIEW", "title": f"Independent review: {title}",
-        "owner": owner, "status": "active", "stage": "review", "final": True,
-        "next_action": "Independently inspect the task branch diff, rerun acceptance checks, and report approve or reject.",
-        "acceptance": ["Implementation matches the task", "All checks pass", "No unresolved high-risk finding"],
+        "id": f"{root_id}-{suffix}", "title": f"Independent review {index}: {title}",
+        "owner": owner, "status": "active", "stage": stage, "final": True,
+        "next_action": "Inspect the exact candidate SHA using the fixed checklist; return pass or block. Put non-blocking findings in backlog.",
+        "acceptance": [
+            "Exact candidate SHA inspected without mutation",
+            "Declared verification commands pass",
+            "Task acceptance and lease/session invariants hold",
+            "Return exactly pass or block; non-blocking findings go to backlog",
+        ],
         "verify_commands": [], "rule_tags": ["review"], "last_output": "", "blockers": [],
         "decision_ids": [], "cli_sessions": {}, "required_role": "reviewer",
         "required_capabilities": ["review"],
-        "independent_session": owner == implementation_owner or data["agents"][owner].get("driver") == implementation_driver,
+        "review_index": index,
+        "independent_session": owner == implementation_owner,
     }
+
+
+def _review_tasks(data: dict, root_id: str, title: str, implementation_owner: str) -> list[dict]:
+    count = int(data.get("orchestration", {}).get("reviewers", 2))
+    if count != 2:
+        raise ValueError("fixed review policy requires exactly two reviewers")
+    choices = _review_candidates(data, implementation_owner)
+    selected = [choices[index % len(choices)]["agent"] for index in range(2)]
+    return [
+        _review_task(data, root_id, title, implementation_owner, index + 1, selected[index])
+        for index in range(2)
+    ]
 
 
 def submit(
@@ -265,7 +292,7 @@ def submit(
                 workflow["git"] = _prepare_git(project, workflow)
             except git_flow.GitFlowBlocked as exc:
                 workflow["git"] = {"status": "pending", "target_branch": target, "error": str(exc)}
-            workflow["queue"] = [_review_task(data, task_id, text, owner)]
+            workflow["queue"] = _review_tasks(data, task_id, text, owner)
 
     state["task"] = task
     state["workflow"] = workflow
@@ -366,6 +393,17 @@ def propose_plan(project: str, context_summary: str, plan: list[dict]) -> dict:
         raise ValueError("current task is not waiting for a planner proposal")
     data = af.load_protocol(project)
     milestones = _plan_milestones(data, workflow, plan)
+    if workflow.get("code_change") and milestones:
+        supplied_final = milestones.pop()
+        implementation_owner = next(
+            (item.get("owner") for item in reversed(milestones) if item.get("stage") == "implementation"),
+            task.get("owner"),
+        )
+        reviews = _review_tasks(data, workflow["id"], workflow.get("title", supplied_final.get("title", "task")), implementation_owner)
+        for review in reviews:
+            review["verify_commands"] = list(supplied_final.get("verify_commands") or [])
+            review["acceptance"].extend(supplied_final.get("acceptance") or [])
+        milestones.extend(reviews)
     workflow.update({
         "status": "awaiting_confirmation", "context_summary": context_summary[:2000],
         "plan": milestones, "proposed_at": datetime.now().isoformat(timespec="seconds"),
@@ -558,6 +596,14 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
         return None
     protocol = af.load_protocol(project)
     strict = leases.is_strict(protocol)
+    if completed_task.get("stage") in ("review", "adjudication"):
+        workflow.setdefault("review_results", []).append({
+            "task_id": completed_task.get("id"),
+            "reviewer": completed_task.get("owner"),
+            "result": "pass",
+            "candidate_sha": workflow.get("candidate_commit"),
+            "output": completed_task.get("last_output", "")[-500:],
+        })
     if not any(item.get("id") == completed_task.get("id") for item in workflow.setdefault("completed", [])):
         workflow["completed"].append({
             "id": completed_task.get("id"), "title": completed_task.get("title"),
@@ -566,6 +612,13 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
         })
     if completed_task.get("stage") == "implementation":
         workflow["last_implementation"] = copy.deepcopy(completed_task)
+        workflow["review_results"] = []
+        workflow["adjudications"] = 0
+        if workflow.pop("needs_rereview", False):
+            workflow["queue"] = _review_tasks(
+                protocol, workflow["id"], workflow.get("title", completed_task.get("title", "task")),
+                completed_task.get("owner"),
+            )
         if strict and workflow.get("code_change"):
             try:
                 candidate = git_flow.checkpoint_branch(
@@ -597,8 +650,47 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
         state["workflow"] = workflow
         state["task"] = task
         return task, "advance"
+    if completed_task.get("stage") == "review":
+        current_results = [
+            item for item in workflow.get("review_results", [])
+            if item.get("candidate_sha") == workflow.get("candidate_commit")
+            and "REVIEW-" in str(item.get("task_id"))
+        ]
+        if {item.get("result") for item in current_results} == {"pass", "block"}:
+            adjudications = int(workflow.get("adjudications", 0))
+            if adjudications >= int(protocol.get("orchestration", {}).get("max_adjudications", 1)):
+                completed_task.update({"status": "blocked", "blockers": ["adjudication_cap_reached"]})
+                workflow["status"] = "blocked"
+                state["workflow"] = workflow
+                state["task"] = completed_task
+                return completed_task, "blocked"
+            workflow["adjudications"] = adjudications + 1
+            implementation = workflow.get("last_implementation") or {}
+            task = _review_task(
+                protocol, workflow["id"], workflow.get("title", "task"),
+                implementation.get("owner"), index=1, stage="adjudication",
+            )
+            task["candidate_commit"] = workflow.get("candidate_commit")
+            state["workflow"] = workflow
+            state["task"] = task
+            return task, "advance"
     if workflow.get("code_change"):
         if strict:
+            results = workflow.get("review_results") or []
+            pass_count = sum(item.get("result") == "pass" for item in results if item.get("candidate_sha") == workflow.get("candidate_commit"))
+            adjudication_pass = any(
+                item.get("result") == "pass" and "ADJUDICATION" in str(item.get("task_id"))
+                for item in results
+            )
+            if pass_count < 2 and not adjudication_pass:
+                completed_task.update({
+                    "status": "blocked", "next_action": "Fixed review policy did not reach a decision",
+                    "blockers": ["two_reviews_or_one_adjudication_required"],
+                })
+                workflow["status"] = "blocked"
+                state["workflow"] = workflow
+                state["task"] = completed_task
+                return completed_task, "blocked"
             try:
                 git_flow.assert_review_commit(
                     af.task_workspace(project, state), workflow.get("candidate_commit", "")
@@ -652,30 +744,55 @@ def advance_after_completion(project: str, state: dict, completed_task: dict) ->
 
 
 def reject_review(project: str, reason: str) -> dict:
-    """Return a rejected review to the original executor and preserved session."""
+    """Record block; run reviewer two, one adjudication, or resume repair."""
     from . import agent_flow as af
 
     state = af.load_state(project)
     workflow = state.get("workflow") or {}
     review = state.get("task") or {}
     implementation = copy.deepcopy(workflow.get("last_implementation") or {})
-    if workflow.get("status") != "active" or review.get("stage") != "review" or not implementation:
+    if workflow.get("status") != "active" or review.get("stage") not in ("review", "adjudication") or not implementation:
         raise ValueError("current workflow is not in an independently reviewable state")
-    count = int(workflow.get("review_rejections", 0)) + 1
-    workflow["review_rejections"] = count
+    workflow.setdefault("review_results", []).append({
+        "task_id": review.get("id"), "reviewer": review.get("owner"), "result": "block",
+        "candidate_sha": workflow.get("candidate_commit"), "output": reason[:500],
+    })
     archived_review = copy.deepcopy(review)
     archived_at = datetime.now().isoformat(timespec="seconds")
-    for session in archived_review.get("cli_sessions", {}).values():
-        session["status"] = "archived"
-        session["archived_at"] = archived_at
+    if archived_review.get("active_session"):
+        archived_review.setdefault("session_archive", []).append({
+            **archived_review["active_session"], "status": "archived", "archived_at": archived_at,
+        })
+        archived_review["active_session"] = None
     archived_review.update({"status": "rejected", "reason": reason, "archived_at": archived_at})
     workflow.setdefault("review_history", []).append(archived_review)
-    rerun_review = copy.deepcopy(review)
-    rerun_review.update({
-        "id": f"{workflow['id']}-REVIEW-R{count + 1}", "status": "active",
-        "last_output": "", "blockers": [], "cli_sessions": {},
-    })
-    workflow.setdefault("queue", []).insert(0, rerun_review)
+    if workflow.get("queue"):
+        next_review = workflow["queue"].pop(0)
+        next_review["candidate_commit"] = workflow.get("candidate_commit")
+        state["workflow"] = workflow
+        state["task"] = next_review
+        af.save_state(project, state)
+        return {"project": project, "workflow": workflow, "task": next_review}
+
+    results = [item for item in workflow.get("review_results", []) if item.get("candidate_sha") == workflow.get("candidate_commit")]
+    outcomes = {item.get("result") for item in results if "REVIEW-" in str(item.get("task_id"))}
+    if review.get("stage") == "review" and outcomes == {"pass", "block"}:
+        adjudications = int(workflow.get("adjudications", 0))
+        protocol = af.load_protocol(project)
+        if adjudications >= int(protocol.get("orchestration", {}).get("max_adjudications", 1)):
+            raise ValueError("adjudication cap reached")
+        workflow["adjudications"] = adjudications + 1
+        adjudicator = _review_task(
+            protocol, workflow["id"], workflow.get("title", "task"),
+            implementation.get("owner"), index=1, stage="adjudication",
+        )
+        adjudicator["candidate_commit"] = workflow.get("candidate_commit")
+        state["workflow"] = workflow
+        state["task"] = adjudicator
+        af.save_state(project, state)
+        return {"project": project, "workflow": workflow, "task": adjudicator}
+
+    workflow["needs_rereview"] = True
     implementation.update({
         "status": "active", "next_action": f"Repair independent review findings: {reason}",
         "last_output": "\n".join(filter(None, [implementation.get("last_output", ""), f"Reviewer rejected: {reason}"])),

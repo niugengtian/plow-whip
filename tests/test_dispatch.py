@@ -163,7 +163,7 @@ class TestDispatchMain(DispatchTestBase):
             result = _dispatch_codex_cli("work", "P1")
         self.assertFalse(result["success"])
         self.assertIn("任务状态未推进", result["detail"])
-        session = af.load_state("P1")["task"]["cli_sessions"]["codex_cli"]
+        session = af.load_state("P1")["task"]["active_session"]
         self.assertEqual(session["session_id"], "codex-session-1")
         command = mock_popen.call_args.args[0]
         child_env = mock_popen.call_args.kwargs["env"]
@@ -184,7 +184,8 @@ class TestDispatchMain(DispatchTestBase):
     def test_codex_existing_session_is_resumed(self, mock_popen, _mock_which):
         af.cmd_init("P1")
         state = af.load_state("P1")
-        state["task"]["cli_sessions"]["codex_cli"] = {
+        state["task"]["active_session"] = {
+            "agent": "codex_cli",
             "session_id": "codex-session-1",
             "status": "active",
         }
@@ -247,7 +248,7 @@ class TestDispatchMain(DispatchTestBase):
 
         first = _dispatch_cursor_cli("work", "P1")
         self.assertFalse(first["success"])
-        session = af.load_state("P1")["task"]["cli_sessions"]["cursor_cli"]
+        session = af.load_state("P1")["task"]["active_session"]
         self.assertEqual(session["session_id"], "cursor-session-1")
 
         second = _dispatch_cursor_cli("continue", "P1")

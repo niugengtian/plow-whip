@@ -31,8 +31,12 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.environ.get("PLOW_WHIP_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".plow-whip"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-ROTATE_MAX_LINES = 100
-ROTATE_MAX_KB = 8
+ROTATION_SOFT_TOKENS = 3000
+ROTATION_HARD_TOKENS = 4000
+ROTATION_FILE_SAFETY_BYTES = 16384
+ROTATION_CARRY_MAX_TOKENS = 300
+ROTATE_MAX_LINES = 100  # compatibility-only display threshold
+ROTATE_MAX_KB = ROTATION_FILE_SAFETY_BYTES // 1024
 
 HOT_TOKEN_BUDGET = 1200
 WARM_TOKEN_BUDGET = 4000
@@ -333,7 +337,8 @@ def default_state(project):
             "last_output": "",
             "blockers": [],
             "decision_ids": [],
-            "cli_sessions": {},
+            "active_session": None,
+            "session_archive": [],
             "placeholder": True,
         },
         "goal": None,
@@ -377,7 +382,22 @@ def load_state(project):
     task.setdefault("last_output", state.get("last_output", ""))
     task.setdefault("blockers", state.get("blockers", []))
     task.setdefault("decision_ids", [])
-    task.setdefault("cli_sessions", {})
+    legacy_sessions = task.pop("cli_sessions", {})
+    task.setdefault("session_archive", [])
+    task.setdefault("active_session", None)
+    if legacy_sessions and not task["active_session"]:
+        active = [
+            {**value, "agent": agent}
+            for agent, value in legacy_sessions.items()
+            if value.get("status", "active") == "active"
+        ]
+        if active:
+            task["active_session"] = active[-1]
+        task["session_archive"].extend(
+            {**value, "agent": agent, "status": "archived"}
+            for agent, value in legacy_sessions.items()
+            if not active or value.get("session_id") != active[-1].get("session_id")
+        )
     if task.get("id") == "T-001" and task.get("title") == "Project initialization":
         task.setdefault("placeholder", True)
     goal = state.get("goal") or {}
@@ -401,6 +421,7 @@ def write_state(project, state, touch=True):
 
         interaction["thread_ref"] = thread_ref(legacy_thread_id)
     _apply_task_to_legacy_fields(state)
+    _refresh_recovery_snapshot(state)
     if touch:
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
     state.setdefault("task_context", {}).pop("project_path", None)
@@ -441,6 +462,28 @@ def _apply_task_to_legacy_fields(state):
     state["last_output"] = task.get("last_output", "")
     state["blockers"] = task.get("blockers", [])
     state["verify_commands"] = task.get("verify_commands", [])
+
+
+def _refresh_recovery_snapshot(state):
+    """Persist a small Git-backed continuation record; raw CLI logs stay cold."""
+    task = state.get("task") or {}
+    workflow = state.get("workflow") or {}
+    session = task.get("active_session") or {}
+    snapshot = {
+        "v": 1,
+        "task": task.get("id"),
+        "stage": task.get("stage"),
+        "owner": task.get("owner"),
+        "next": _clamp_text(task.get("next_action", ""), 200),
+        "output": _clamp_text(task.get("last_output", ""), 120),
+        "verify": [_clamp_text(item, 120) for item in (task.get("verify_commands") or [])[:2]],
+        "candidate_sha": workflow.get("candidate_commit"),
+        "session": {
+            "id": session.get("session_id"),
+            "agent": session.get("agent"),
+        } if session else None,
+    }
+    task["recovery"] = snapshot
 
 
 def ensure_project_path(project, state=None, write=True):
@@ -593,7 +636,10 @@ def _needs_rotation(project, agent):
     size = os.path.getsize(curr)
     with open(curr, encoding="utf-8") as f:
         line_count = len(f.readlines())
-    return (line_count > ROTATE_MAX_LINES or size > ROTATE_MAX_KB * 1024), line_count, size
+    tokens = max(1, (size + 3) // 4)
+    return (
+        tokens >= ROTATION_SOFT_TOKENS or size >= ROTATION_FILE_SAFETY_BYTES
+    ), line_count, size
 
 
 def estimate_tokens(text):
@@ -642,7 +688,9 @@ def generate_carry_forward(project, agent, content, summary=None):
         lines.append("### Recent Signals")
         lines.extend(f"- {_clamp_text(line, 220)}" for line in signals)
     lines.append("")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    max_chars = ROTATION_CARRY_MAX_TOKENS * 4
+    return result if len(result) <= max_chars else result[:max_chars].rstrip() + "\n"
 
 
 def check_and_rotate_agent(project, agent, topic=None):
@@ -822,6 +870,8 @@ def build_rotation_health(project):
                 "agent": agent,
                 "lines": lines,
                 "bytes": size,
+                "estimated_tokens": max(0, (size + 3) // 4),
+                "hard_rotation": max(0, (size + 3) // 4) >= ROTATION_HARD_TOKENS or size >= ROTATION_FILE_SAFETY_BYTES,
                 "needs_rotation": needs,
             }
         )
@@ -1634,7 +1684,11 @@ def _clamp_text(text, max_chars):
     return text[:max_chars].rstrip() + "\n... [truncated]"
 
 
-START_PACK_MAX_CHARS = 16000
+START_PACK_NORMAL_TOKENS = 600
+START_PACK_HARD_TOKENS = 1200
+START_PACK_MAX_RULES = 8
+# Compatibility name retained for callers that used the old character budget.
+START_PACK_MAX_CHARS = START_PACK_HARD_TOKENS * 4
 
 
 def _bounded_start_value(value, depth=0):
@@ -1696,7 +1750,7 @@ def cmd_context_pack(project, args):
 
 
 def build_start_pack(project, agent=None):
-    """Return the complete, bounded machine startup payload."""
+    """Return compact English JSON; local safety checks consume no model tokens."""
     report = build_doctor_report(project)
     if not report["ok"]:
         repairable = bool(report["missing"]) or _issues_are_repairable(report.get("issues", []))
@@ -1732,74 +1786,80 @@ def build_start_pack(project, agent=None):
             }
         except leases.LeaseDenied as exc:
             authorization = {"mode": "observer", "execution_allowed": False, "reason": str(exc)}
-    task = _bounded_start_task(raw_task)
-    task["owner"] = state.get("assigned_agent") or task.get("owner")
+    workflow = state.get("workflow") or {}
+    active_session = raw_task.get("active_session") or {}
     raw_next = state.get("next_action", raw_task.get("next_action", ""))
-    task["next_action"] = _clamp_text(raw_next, 2000)
-    if task["next_action"] != (raw_next or "").strip():
-        task["next_action_truncated"] = True
-    raw_output = (state.get("last_output", raw_task.get("last_output", "")) or "").strip()
-    task["last_output"] = (
-        "... [truncated]\n" + raw_output[-1000:]
-        if len(raw_output) > 1000 else raw_output
-    )
-    if task["last_output"] != raw_output:
-        task["last_output_truncated"] = True
-    task["blockers"] = _bounded_start_value(state.get("blockers", raw_task.get("blockers", [])))
     messages = [
-        _clamp_text(message, 1000)
-        for message in _latest_targeted_blocks(_read_text(comms_file(project)), agent, limit=6)
+        _clamp_text(message, 180)
+        for message in _latest_targeted_blocks(_read_text(comms_file(project)), agent, limit=2)
         if f"@{agent}" in message and "启动自检确认" not in message
-    ][-3:]
-    rule_pack = proto.compiled_rules(data, agent, raw_task)
-    goal = state.get("goal") or None
-    goal_view = None if not goal else {
-        "id": goal.get("id"),
-        "text": _clamp_text(goal.get("text", ""), 1200),
-        "status": goal.get("status"),
-        "context_summary": goal.get("context_summary", "")[:1200],
-        "progress": f"{len(goal.get('completed', []))}/{goal.get('total', 0)}",
+    ][-1:]
+    task = {
+        "id": raw_task.get("id"),
+        "stage": raw_task.get("stage"),
+        "owner": state.get("assigned_agent") or raw_task.get("owner"),
+        "status": raw_task.get("status"),
+        "title": _clamp_text(raw_task.get("title", ""), 160),
+        "next": _clamp_text(raw_next, 360),
+        "acceptance": [_clamp_text(item, 120) for item in (raw_task.get("acceptance") or [])[:4]],
+        "verify": [_clamp_text(item, 200) for item in (raw_task.get("verify_commands") or [])[:4]],
+        "blockers": [_clamp_text(item, 120) for item in (raw_task.get("blockers") or [])[:3]],
+        "candidate_sha": workflow.get("candidate_commit") or raw_task.get("candidate_commit"),
     }
     pack = {
+        "v": 1,
         "ready": True,
         "project": project,
-        "project_path": task_workspace(project, state) if authorization["execution_allowed"] else project_dir(project),
+        "workspace": task_workspace(project, state) if authorization["execution_allowed"] else project_dir(project),
         "agent": agent,
-        "authorization": authorization,
+        "auth": authorization,
         "task": task,
-        "goal": goal_view,
-        **rule_pack,
+        "session": ({"id": active_session.get("session_id"), "agent": active_session.get("agent")}
+                    if active_session else None),
+        "recovery": raw_task.get("recovery"),
+        "rules": proto.compact_rules(data, agent, raw_task, START_PACK_MAX_RULES),
         "messages": messages,
-        "decision_ids": task.get("decision_ids", []),
-        "memory": data.get("memory", {}),
     }
     if authorization["execution_allowed"]:
-        pack["writeback"] = {
+        pack["commands"] = {
             "progress": f"plow-whip --project {project} task progress --output '...' --next '...'",
             "complete": f"plow-whip --project {project} task complete --output '...'",
-            "handoff": f"plow-whip --project {project} handoff --to <agent> --output '...' --next '...'",
-            "plan_propose": f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'",
         }
-        if not leases.is_strict(data):
-            pack["writeback"]["goal_plan"] = (
-                f"plow-whip --project {project} goal plan "
-                "--context-summary '...' --plan-json '[{...}]'"
-            )
-    if "planning" in raw_task.get("rule_tags", []):
-        pack["routing_catalog"] = routing.planner_catalog(data)
-    pack["rules_meta"]["startup_payload_max_chars"] = START_PACK_MAX_CHARS
-    payload_chars = len(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    pack["rules_meta"]["startup_payload_chars"] = payload_chars
-    payload_chars = len(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    pack["rules_meta"]["startup_payload_chars"] = payload_chars
-    if payload_chars > START_PACK_MAX_CHARS:
+        if "planning" in raw_task.get("rule_tags", []):
+            pack["commands"]["plan"] = f"plow-whip --project {project} plan propose --context-summary '...' --plan-json '[{{...}}]'"
+    payload_tokens = estimate_tokens(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    content_budget = START_PACK_NORMAL_TOKENS - 50  # reserve space for budget metadata
+    if payload_tokens > content_budget:
+        # Deterministic emergency compaction still preserves the executable next
+        # action, lease identity, recovery pointer, and local rule contract.
+        task["title"] = _clamp_text(task["title"], 80)
+        task["next"] = _clamp_text(task["next"], 180)
+        task["acceptance"] = task["acceptance"][:2]
+        task["verify"] = task["verify"][:2]
+        pack["messages"] = []
+        payload_tokens = estimate_tokens(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if payload_tokens > content_budget:
+        task["title"] = ""
+        task["acceptance"] = []
+        task["blockers"] = task["blockers"][:1]
+        task["verify"] = task["verify"][:1]
+        pack["rules"] = pack["rules"][:6]
+        payload_tokens = estimate_tokens(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    pack["budget"] = {
+        "estimated_tokens": payload_tokens,
+        "normal_max": START_PACK_NORMAL_TOKENS,
+        "hard_max": START_PACK_HARD_TOKENS,
+    }
+    payload_tokens = estimate_tokens(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    pack["budget"]["estimated_tokens"] = payload_tokens
+    if payload_tokens > START_PACK_HARD_TOKENS:
         return {
             "ready": False,
             "project": project,
             "agent": agent,
             "action_required": "reduce_startup_payload",
-            "startup_payload_chars": payload_chars,
-            "startup_payload_max_chars": START_PACK_MAX_CHARS,
+            "startup_payload_tokens": payload_tokens,
+            "startup_payload_hard_max_tokens": START_PACK_HARD_TOKENS,
         }
     return pack
 
@@ -1927,7 +1987,14 @@ def run_task_verification(project, commands, task=None):
 
 
 def _archive_task_sessions(project, task):
-    if not task.get("cli_sessions"):
+    active = task.get("active_session")
+    archived = list(task.get("session_archive") or [])
+    if active:
+        active = {**active, "status": "archived", "archived_at": datetime.now().isoformat(timespec="seconds")}
+        archived.append(active)
+        task["active_session"] = None
+        task["session_archive"] = archived
+    if not archived:
         return
     validate_identifier(task.get("id", "task"), "task")
     atomic_write_json(os.path.join(project_memory_dir(project), "sessions", f"{task['id']}_cli_sessions.json"), {
@@ -1936,7 +2003,7 @@ def _archive_task_sessions(project, task):
         "title": task.get("title"),
         "final_output": task.get("last_output", ""),
         "archived_at": datetime.now().isoformat(timespec="seconds"),
-        "cli_sessions": task.get("cli_sessions", {}),
+        "sessions": archived,
     })
 
 
@@ -2109,7 +2176,8 @@ def cmd_task(project, args):
             "last_output": "",
             "blockers": [],
             "decision_ids": getattr(args, "decisions", None) or [],
-            "cli_sessions": {},
+            "active_session": None,
+            "session_archive": [],
         }
         state["current_agent"] = owner
         state["assigned_agent"] = owner
@@ -2160,9 +2228,12 @@ def cmd_task(project, args):
                 task["next_action"] = ""
                 task["blockers"] = []
                 archived_at = datetime.now().isoformat(timespec="seconds")
-                for session in task.setdefault("cli_sessions", {}).values():
-                    session["status"] = "archived"
-                    session["archived_at"] = archived_at
+                session = task.get("active_session")
+                if session:
+                    task.setdefault("session_archive", []).append({
+                        **session, "status": "archived", "archived_at": archived_at,
+                    })
+                    task["active_session"] = None
         else:
             task["status"] = "active"
     completed_task = task
@@ -2454,7 +2525,10 @@ def cmd_sync():
 def cmd_desktop(project, args):
     from . import codex_desktop
 
-    payload = codex_desktop.sync(project) if args.action == "sync" else codex_desktop.status(project)
+    if args.action in ("bind", "rebind"):
+        payload = codex_desktop.bind_control(project, rebind=args.action == "rebind")
+    else:
+        payload = codex_desktop.sync(project) if args.action == "sync" else codex_desktop.status(project)
     if args.action == "sync" and payload.get("status") == "synced":
         check_and_rotate_agent(project, "codex", topic="desktop_sync")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -2669,7 +2743,7 @@ def main():
     submit_parser.add_argument("--source", default="current_session", help="Interaction source identifier")
     submit_parser.add_argument("--replace", action="store_true", help="Deliberately replace current active work")
     desktop_parser = sub.add_parser("desktop", help="Sync or inspect the local Codex Desktop conversation")
-    desktop_parser.add_argument("action", choices=["sync", "status"])
+    desktop_parser.add_argument("action", choices=["sync", "status", "bind", "rebind"])
 
     plan_parser = sub.add_parser("plan", help="Propose or confirm a non-goal milestone workflow")
     plan_sub = plan_parser.add_subparsers(dest="action", required=True)
