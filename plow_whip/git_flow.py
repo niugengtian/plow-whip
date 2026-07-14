@@ -18,6 +18,7 @@ RELEASE_E2E_FLOW = [
     "submit", "scheduler claim", "implementation", "controlled writeback",
     "two reviews", "push", "fast-forward", "done",
 ]
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def release_gate_required(project_path: str, git_state: dict) -> bool:
@@ -52,6 +53,40 @@ def validate_release_gate(report: dict) -> None:
         raise GitFlowBlocked("release gate: GitHub E2E flow evidence is incomplete")
     if not e2e.get("temporary_branches_deleted"):
         raise GitFlowBlocked("release gate: temporary GitHub E2E branches remain")
+    if not str(e2e.get("run_id") or "").strip():
+        raise GitFlowBlocked("release gate: GitHub E2E run ID is missing")
+    sha_fields = ("candidate_sha", "main_sha_before", "main_sha_after")
+    if any(not _FULL_SHA.fullmatch(str(e2e.get(name) or "")) for name in sha_fields):
+        raise GitFlowBlocked("release gate: GitHub E2E SHA evidence is invalid")
+    if e2e["main_sha_before"] != e2e["main_sha_after"]:
+        raise GitFlowBlocked("release gate: GitHub E2E mutated main")
+    branches = (str(e2e.get("target_branch") or ""), str(e2e.get("task_branch") or ""))
+    if any(not branch or branch == "main" for branch in branches) or branches[0] == branches[1]:
+        raise GitFlowBlocked("release gate: GitHub E2E temporary branch evidence is invalid")
+
+
+def verify_github_e2e_remote(report: dict) -> None:
+    """Confirm immutable remote facts after the E2E temporary branches are deleted."""
+    e2e = report.get("github_e2e") or {}
+    remote = f"https://github.com/{RELEASE_E2E_REPOSITORY}.git"
+    refs = [
+        "refs/heads/main",
+        f"refs/heads/{e2e.get('target_branch', '')}",
+        f"refs/heads/{e2e.get('task_branch', '')}",
+    ]
+    result = subprocess.run(
+        ["git", "ls-remote", remote, *refs], capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        raise GitFlowBlocked(f"release gate: unable to verify GitHub E2E remote: {(result.stderr or result.stdout).strip()[-300:]}")
+    found = {}
+    for line in result.stdout.splitlines():
+        sha, ref = line.split(None, 1)
+        found[ref] = sha
+    if found.get("refs/heads/main") != e2e.get("main_sha_before"):
+        raise GitFlowBlocked("release gate: GitHub E2E main SHA does not match remote")
+    if any(ref in found for ref in refs[1:]):
+        raise GitFlowBlocked("release gate: GitHub E2E temporary branch still exists remotely")
 
 
 def _run(project_path: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -228,7 +263,9 @@ def publish_reviewed(
     assert_review_commit(project_path, expected_commit)
     publisher = publisher_path or project_path
     if release_gate_required(publisher, git_state):
-        validate_release_gate(git_state.get("release_gate_report") or {})
+        report = git_state.get("release_gate_report") or {}
+        validate_release_gate(report)
+        verify_github_e2e_remote(report)
     branch = git_state.get("branch") or _branch_name(task_id)
     target = git_state.get("target_branch") or "main"
     _run(publisher, "push", "origin", f"{expected_commit}:refs/heads/{branch}")

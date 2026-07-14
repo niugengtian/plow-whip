@@ -204,6 +204,12 @@ class StrictUnattendedTest(unittest.TestCase):
                 "fallback_configured": True,
                 "flow": git_flow.RELEASE_E2E_FLOW,
                 "temporary_branches_deleted": True,
+                "run_id": "e2e-test-run",
+                "candidate_sha": "1" * 40,
+                "main_sha_before": "2" * 40,
+                "main_sha_after": "2" * 40,
+                "target_branch": "e2e-target-test",
+                "task_branch": "e2e-task-test",
             },
         }
         self.assertFalse(git_flow.release_gate_required(af.project_dir("P"), {"target_branch": "main"}))
@@ -212,6 +218,18 @@ class StrictUnattendedTest(unittest.TestCase):
             "target_branch": "main", "release_branch": True,
         }))
         git_flow.validate_release_gate(report)
+        e2e = report["github_e2e"]
+        remote_output = f"{e2e['main_sha_before']}\trefs/heads/main\n"
+        with patch("subprocess.run", return_value=SimpleNamespace(
+            returncode=0, stdout=remote_output, stderr="",
+        )):
+            git_flow.verify_github_e2e_remote(report)
+        with patch("subprocess.run", return_value=SimpleNamespace(
+            returncode=0,
+            stdout=remote_output + f"{e2e['candidate_sha']}\trefs/heads/{e2e['task_branch']}\n",
+            stderr="",
+        )), self.assertRaisesRegex(git_flow.GitFlowBlocked, "still exists"):
+            git_flow.verify_github_e2e_remote(report)
         with self.assertRaisesRegex(git_flow.GitFlowBlocked, "startup budget"):
             git_flow.validate_release_gate({**report, "startup_tokens": 601})
 
@@ -239,6 +257,12 @@ class StrictUnattendedTest(unittest.TestCase):
                 "fallback_configured": True,
                 "flow": git_flow.RELEASE_E2E_FLOW,
                 "temporary_branches_deleted": True,
+                "run_id": "e2e-progress-test",
+                "candidate_sha": "3" * 40,
+                "main_sha_before": "4" * 40,
+                "main_sha_after": "4" * 40,
+                "target_branch": "e2e-target-progress",
+                "task_branch": "e2e-task-progress",
             },
         }
         state = af.load_state("P")
