@@ -236,7 +236,11 @@ class StrictUnattendedTest(unittest.TestCase):
         }))
         git_flow.validate_release_gate(report)
         e2e = report["github_e2e"]
-        remote_output = f"{e2e['main_sha_before']}\trefs/heads/main\n"
+        evidence_ref = f"refs/tags/{git_flow.RELEASE_E2E_TAG_PREFIX}{e2e['run_id']}"
+        remote_output = (
+            f"{e2e['main_sha_before']}\trefs/heads/main\n"
+            f"{e2e['candidate_sha']}\t{evidence_ref}\n"
+        )
         with patch("subprocess.run", return_value=SimpleNamespace(
             returncode=0, stdout=remote_output, stderr="",
         )):

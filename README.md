@@ -435,7 +435,7 @@ collab/
 
 `plow-whip` 自身发布到 `main` 时可显式标记 release branch；只有这一最终合并会触发 release gate。闸门复核 startup/recovery 预算，并要求专用公开仓库 `niugengtian/plow-whip-e2e` 的 `stable-minimal-task` 完成 submit → scheduler claim → implementation → controlled writeback → 两次 review → push → fast-forward → done；临时 target/task 分支成功后删除，测试仓库 `main` 不被修改。
 
-发布 Task 必须在 `submit` 时显式加 `--release-branch`；该标记会进入 Git workflow。GitHub E2E 完成后，Worker 通过受租约保护的 `task progress --release-gate-report '<JSON>'` 写入运行 ID、candidate/main SHA 和临时分支证据。发布进程在最终 fast-forward `main` 前会实时查询 GitHub，确认 E2E 仓库 `main` 未变且两个临时分支已删除。未标记的普通 Task 不触发该闸门。
+发布 Task 必须在 `submit` 时显式加 `--release-branch`；该标记会进入 Git workflow。GitHub E2E 完成后，Worker 通过受租约保护的 `task progress --release-gate-report '<JSON>'` 写入运行 ID、candidate/main SHA 和临时分支证据，并在公开 E2E 仓库留下指向 candidate 的 `plow-whip-e2e/<run_id>` 证据 tag。发布进程在最终 fast-forward `main` 前会实时查询 GitHub，核对该 tag、确认 E2E 仓库 `main` 未变且两个临时分支已删除。未标记的普通 Task 不触发该闸门。
 
 <a id="command-index"></a>
 ## 完整命令索引

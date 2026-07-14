@@ -14,6 +14,7 @@ class GitFlowBlocked(RuntimeError):
 
 RELEASE_E2E_REPOSITORY = "niugengtian/plow-whip-e2e"
 RELEASE_E2E_FIXTURE = "stable-minimal-task"
+RELEASE_E2E_TAG_PREFIX = "plow-whip-e2e/"
 RELEASE_E2E_FLOW = [
     "submit", "scheduler claim", "implementation", "controlled writeback",
     "two reviews", "push", "fast-forward", "done",
@@ -53,7 +54,8 @@ def validate_release_gate(report: dict) -> None:
         raise GitFlowBlocked("release gate: GitHub E2E flow evidence is incomplete")
     if not e2e.get("temporary_branches_deleted"):
         raise GitFlowBlocked("release gate: temporary GitHub E2E branches remain")
-    if not str(e2e.get("run_id") or "").strip():
+    run_id = str(e2e.get("run_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
         raise GitFlowBlocked("release gate: GitHub E2E run ID is missing")
     sha_fields = ("candidate_sha", "main_sha_before", "main_sha_after")
     if any(not _FULL_SHA.fullmatch(str(e2e.get(name) or "")) for name in sha_fields):
@@ -73,6 +75,7 @@ def verify_github_e2e_remote(report: dict) -> None:
         "refs/heads/main",
         f"refs/heads/{e2e.get('target_branch', '')}",
         f"refs/heads/{e2e.get('task_branch', '')}",
+        f"refs/tags/{RELEASE_E2E_TAG_PREFIX}{e2e.get('run_id', '')}",
     ]
     result = subprocess.run(
         ["git", "ls-remote", remote, *refs], capture_output=True, text=True, check=False,
@@ -85,8 +88,10 @@ def verify_github_e2e_remote(report: dict) -> None:
         found[ref] = sha
     if found.get("refs/heads/main") != e2e.get("main_sha_before"):
         raise GitFlowBlocked("release gate: GitHub E2E main SHA does not match remote")
-    if any(ref in found for ref in refs[1:]):
+    if any(ref in found for ref in refs[1:3]):
         raise GitFlowBlocked("release gate: GitHub E2E temporary branch still exists remotely")
+    if found.get(refs[3]) != e2e.get("candidate_sha"):
+        raise GitFlowBlocked("release gate: GitHub E2E evidence tag does not match candidate")
 
 
 def _run(project_path: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
