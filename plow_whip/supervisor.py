@@ -407,7 +407,7 @@ def renew_live_leases(live: list[dict]) -> list[dict]:
     """Extend signed metadata for live strict workers without replacing tokens."""
     renewed = []
     for worker in live:
-        if not _pid_alive(worker.get("pid")):
+        if not (_pid_alive(worker.get("pid")) or _pid_alive(worker.get("cli_pid"))):
             continue
         for _ in range(3):
             try:

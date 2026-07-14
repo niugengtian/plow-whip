@@ -129,6 +129,25 @@ class StrictUnattendedTest(unittest.TestCase):
             self.assertTrue(supervisor._signal_worker_groups(worker, {}, signal.SIGTERM))
         kill.assert_called_once_with(701, signal.SIGTERM)
 
+    def test_live_cli_renews_lease_after_wrapper_exit(self):
+        state = af.load_state("P")
+        state["task"].update({"placeholder": False, "status": "active"})
+        af.save_state("P", state)
+        supervisor.claim_task("P", "T-001", "DP-renew", "codex_cli", "codex_cli")
+        state = af.load_state("P")
+        execution = state["task"]["execution"]
+        execution.update({"worker_pid": 800, "cli_pid": 801, "status": "running"})
+        execution["lease"]["expires_at"] = (datetime.now() + timedelta(seconds=1)).isoformat(timespec="seconds")
+        af.save_state("P", state)
+        worker = {
+            "project": "P", "task_id": "T-001", "dispatch_id": "DP-renew",
+            "driver": "codex_cli", "pid": 800, "cli_pid": 801,
+        }
+        with patch.object(supervisor, "_pid_alive", side_effect=lambda pid: int(pid or 0) == 801):
+            renewed = supervisor.renew_live_leases([worker])
+        self.assertEqual(len(renewed), 1)
+        self.assertEqual(renewed[0]["dispatch_id"], "DP-renew")
+
     def test_startup_and_recovery_budgets_are_bounded_english_json(self):
         state = af.load_state("P")
         state["task"]["next_action"] = "continue " * 1000
