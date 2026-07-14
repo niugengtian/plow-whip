@@ -197,6 +197,32 @@ class StrictUnattendedTest(unittest.TestCase):
         self.assertEqual(completed["blockers"], ["reviewer changed task files: app.py"])
         self.assertEqual(state["workflow"]["review_results"], [])
 
+    def test_blocking_review_checks_exact_candidate_before_recording(self):
+        state = af.load_state("P")
+        implementation = {
+            "id": "T-X", "owner": "codex_cli", "stage": "implementation",
+            "status": "done", "last_output": "built",
+        }
+        review = {
+            "id": "T-X-REVIEW-1", "owner": "cursor_cli", "stage": "review",
+            "status": "active", "next_action": "review", "blockers": [],
+        }
+        state["workflow"] = {
+            "id": "T-X", "status": "active", "code_change": True,
+            "candidate_commit": "abc", "last_implementation": implementation,
+            "queue": [], "review_results": [],
+        }
+        state["task"] = review
+        af.save_state("P", state)
+        with patch.object(af, "task_workspace", return_value="/tmp/candidate"), patch.object(
+            git_flow, "assert_review_commit",
+            side_effect=git_flow.GitFlowBlocked("reviewed commit changed"),
+        ) as integrity:
+            result = tasking.reject_review("P", "code issue")
+        integrity.assert_called_once_with("/tmp/candidate", "abc")
+        self.assertEqual(result["workflow"]["status"], "blocked")
+        self.assertEqual(result["workflow"]["review_results"], [])
+
     def test_review_conflict_creates_exactly_one_pass_or_block_adjudication(self):
         state = af.load_state("P")
         implementation = {

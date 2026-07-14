@@ -775,6 +775,22 @@ def reject_review(project: str, reason: str) -> dict:
     implementation = copy.deepcopy(workflow.get("last_implementation") or {})
     if workflow.get("status") != "active" or review.get("stage") not in ("review", "adjudication") or not implementation:
         raise ValueError("current workflow is not in an independently reviewable state")
+    protocol = af.load_protocol(project)
+    if leases.is_strict(protocol) and workflow.get("code_change"):
+        try:
+            git_flow.assert_review_commit(
+                af.task_workspace(project, state), workflow.get("candidate_commit", "")
+            )
+        except git_flow.GitFlowBlocked as exc:
+            review.update({
+                "status": "blocked", "next_action": "Restore the exact review candidate",
+                "blockers": [str(exc)],
+            })
+            workflow["status"] = "blocked"
+            state["workflow"] = workflow
+            state["task"] = review
+            af.save_state(project, state)
+            return {"project": project, "workflow": workflow, "task": review}
     workflow.setdefault("review_results", []).append({
         "task_id": review.get("id"), "reviewer": review.get("owner"), "result": "block",
         "candidate_sha": workflow.get("candidate_commit"), "output": reason[:500],
@@ -800,7 +816,6 @@ def reject_review(project: str, reason: str) -> dict:
     outcomes = {item.get("result") for item in results if "REVIEW-" in str(item.get("task_id"))}
     if review.get("stage") == "review" and outcomes == {"pass", "block"}:
         adjudications = int(workflow.get("adjudications", 0))
-        protocol = af.load_protocol(project)
         if adjudications >= int(protocol.get("orchestration", {}).get("max_adjudications", 1)):
             raise ValueError("adjudication cap reached")
         workflow["adjudications"] = adjudications + 1
