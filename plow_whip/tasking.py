@@ -370,6 +370,7 @@ def propose_plan(project: str, context_summary: str, plan: list[dict]) -> dict:
         "status": "awaiting_confirmation", "context_summary": context_summary[:2000],
         "plan": milestones, "proposed_at": datetime.now().isoformat(timespec="seconds"),
     })
+    leases.revoke(task, "plan confirmation required")
     task.update({
         "status": "blocked_waiting_human", "next_action": "Wait for human plan confirmation",
         "blockers": ["plan_confirmation_required"], "last_output": context_summary[:2000],

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import plow_whip.agent_flow as af
-from plow_whip import protocol, tasking
+from plow_whip import leases, protocol, supervisor, tasking
 
 
 class TaskingTest(unittest.TestCase):
@@ -71,6 +71,26 @@ class TaskingTest(unittest.TestCase):
         self.assertEqual(confirmed["workflow"]["status"], "active")
         self.assertEqual(confirmed["task"]["title"], "Build")
         self.assertEqual(len(confirmed["workflow"]["queue"]), 1)
+
+    def test_plan_confirmation_revokes_planner_lease_until_fresh_claim(self):
+        payload = tasking.submit("P", "给我设计并实现一个完整支付平台")
+        task = payload["task"]
+        claim = supervisor.claim_task("P", task["id"], "DP-plan", "codex_cli", task["owner"])
+        self.assertTrue(claim["claimed"])
+        tasking.propose_plan("P", "ready for confirmation", [
+            {"title": "Build", "role": "implementation", "acceptance": ["built"]},
+            {"title": "Review", "role": "reviewer", "acceptance": ["approved"], "final_acceptance": True},
+        ])
+        proposed = af.load_state("P")
+        self.assertEqual(proposed["task"]["execution"]["lease"]["status"], "revoked")
+        rejected = tasking.reject_plan("P", "split the implementation")
+        self.assertEqual(rejected["task"]["status"], "active")
+        self.assertEqual(rejected["task"]["execution"]["lease"]["status"], "revoked")
+        with self.assertRaises(leases.LeaseDenied):
+            leases.validate(
+                af.CONFIG_DIR, "P", af.load_state("P"), af.load_protocol("P"),
+                token=claim["lease_token"], agent=task["owner"],
+            )
 
     def test_simple_task_creates_branch_and_independent_review(self):
         with patch("plow_whip.tasking.git_flow.prepare_branch", return_value={"branch": "plow/simple", "target_branch": "main"}):

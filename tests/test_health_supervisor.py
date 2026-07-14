@@ -1,4 +1,5 @@
 import os
+import signal
 import shutil
 import tempfile
 import unittest
@@ -135,6 +136,28 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(len(renewed), 1)
         self.assertEqual(lease["renewals"], 1)
         self.assertGreater(datetime.fromisoformat(lease["expires_at"]), datetime.now() + timedelta(minutes=30))
+
+    def test_real_cli_pid_is_persisted_in_worker_registry(self):
+        supervisor._save_registry({"workers": [{
+            "project": "P0", "task_id": "T-old", "dispatch_id": "DP-old", "pid": 101,
+        }]})
+        self.assertTrue(supervisor.record_cli_pid("P0", "DP-old", 202))
+        worker = supervisor._load_registry()["workers"][0]
+        self.assertEqual(worker["cli_pid"], 202)
+        self.assertIn("cli_started_at", worker)
+
+    def test_revoked_worker_kills_registered_cli_after_task_transition(self):
+        state = af.load_state("P0")
+        worker = {
+            "project": "P0", "task_id": "T-old", "dispatch_id": "DP-old",
+            "pid": 101, "cli_pid": 202,
+        }
+        with patch("plow_whip.supervisor._pid_alive", return_value=True), \
+             patch("plow_whip.supervisor.os.killpg") as killpg:
+            actions = supervisor._stop_revoked_workers([worker])
+        self.assertEqual(actions[0]["reason"], "lease_revoked_or_task_frozen")
+        killpg.assert_any_call(202, signal.SIGTERM)
+        killpg.assert_any_call(101, signal.SIGTERM)
 
     def test_strict_scheduler_rejects_zellij_worker(self):
         state = af.load_state("P0")

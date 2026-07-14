@@ -34,7 +34,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 plow-whip 将“谁负责”与“用什么执行”分开：
 
 ```text
-Submit（严格模式默认由 Codex Desktop 控制面进入；旧模式可由 CLI 或其他入口进入）
+Submit（严格模式由绑定的人机控制面进入：macOS 默认 Codex Desktop，其他系统为交互式终端；旧模式可由其他入口进入）
   └─ 本地零 Token 分类：direct / simple / needs_planner
       ├─ direct：明确且有界，直接交给指定 CLI
       ├─ simple：交给文件持久化的 DeepSeek simple-tasker
@@ -125,7 +125,7 @@ plow-whip --project MyProject plan confirm
 
 计划未确认时状态为 `blocked_waiting_human`，scheduler 不会执行。确认后恢复无人值守。旧的 `task start` 和 `goal` 命令仍保留兼容。
 
-严格项目的 `submit`、计划确认、决策答复、自动化开关等控制命令必须来自当前绑定的 Codex Desktop 会话。项目只公开不可逆 `thread_ref`；CLI Worker 不继承 Desktop 的 origin 与 thread ID，即使主动清除 Worker 租约变量也不能把自己伪装成人工确认。首次控制动作会绑定当前 Desktop 会话；需要换会话时先显式执行 `desktop sync`。
+严格项目的 `submit`、计划确认、决策答复、自动化开关等控制命令必须来自当前绑定的人机控制面。macOS 校验 Codex Desktop Thread 与原生 App 父进程链；Linux/Windows 绑定真实交互式终端会话。项目只公开不可逆引用；后台 CLI Worker 的标准流被重定向，既不继承 Desktop 身份也不能取得交互终端身份。首次控制动作完成绑定；macOS 更换 Desktop 会话时先显式执行 `desktop sync`。
 
 ### 4. Worker 回写进度并完成验收
 
@@ -192,10 +192,10 @@ plow-whip scheduler status
 - `simple_tasker` 复用现有 DeepSeek Brain API 客户端，但增加项目沙箱工具、Task 级 JSONL 会话、断点恢复和自动上下文压缩；生产 Key 只读取环境变量。
 - `zellij` 依赖可用的本地会话且无法安全继承 Worker 租约，因此只保留旧模式兼容；严格模式只调度可携带租约的 CLI Driver。`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
-- 新项目中的 Codex Desktop 是默认可信控制面：可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
+- 新项目默认使用本机人机控制面：macOS 是 Codex Desktop，Linux/Windows 是首次绑定的交互式终端；可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
 - 默认 Cursor Desktop 只是不可调度的观察身份；本版没有它的可信会话授权适配器，因此不能在严格项目中提交、确认或答复决策。Cursor CLI 仍可由 scheduler 持租约执行任务。
 - 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 按项目 incarnation 固定 strict 模式与 `protocol_epoch`，归档后可安全复用项目名，旧版 pin 会自动迁移。状态和日志只保存不可逆 lease ID，不保存 Token。活跃 Worker 的签名租约元数据由 scheduler 续期，长任务无需更换进程环境中的 Token。
-- Codex Desktop 的提交、确认和决策权限同时要求绑定 Thread 与可信 Desktop App 进程父链；伪造 `CODEX_THREAD_ID` 或 origin 环境变量不能获得控制权。
+- macOS 的提交、确认和决策权限同时要求绑定 Thread 与可信 Desktop App 进程父链；Linux/Windows 同时要求 TTY 交互性与已绑定终端会话。单独伪造环境变量不能获得控制权。
 - Worker worktree 的 push URL 被禁用；发布由 scheduler 父进程从控制 checkout 完成。目标分支自动更新默认关闭，未配置受保护身份时只推送 `plow/*` 分支；人工合并冲突期间保留 `awaiting_human_merge`，推送完成后由 scheduler 自动对账。
 - `blocked` 和 `done` 永不自动派发。任务需要外部凭据、人工审批或产品决策时，应明确 block，而不是绕过边界。
 - API Key/Profile 池只对认证、额度和限流错误切换。网络或服务异常打开对应 CLI 的独立熔断器，不累计 Task 重试；连续三次无 Token 探测成功后自动恢复。
@@ -294,7 +294,7 @@ plow-whip --project MyProject agent set backend-backup \
   --priority 70
 ```
 
-Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面；默认 `cursor` 是 `schedulable=false` 的观察身份。两者都不会成为 Task owner、执行器、CLI Session、重试或故障切换目标，但本版只有绑定的 Codex Desktop 会话能通过严格项目的人工控制授权；`codex_cli` 与 `cursor_cli` 才是执行 Driver。项目可以显式修改 Registry，但严格项目的机器回写仍必须持有租约。
+Router 根据 `roles + capabilities + enabled + schedulable + priority + cost_tier + driver availability` 确定性选择；同优先级保持 Registry 顺序。`codex` 固定为 `schedulable=false` 的 Codex Desktop 控制面；默认 `cursor` 是 `schedulable=false` 的观察身份。两者都不会成为 Task owner、执行器、CLI Session、重试或故障切换目标。macOS 使用绑定的 Codex Desktop 会话通过严格项目的人工控制授权，Linux/Windows 使用绑定的交互式终端；`codex_cli` 与 `cursor_cli` 才是执行 Driver。项目可以显式修改 Registry，但严格项目的机器回写仍必须持有租约。
 
 ### Codex Desktop 对话同步
 

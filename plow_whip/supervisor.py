@@ -43,6 +43,32 @@ def _save_registry(value: dict) -> None:
         atomic_write_json(path, value)
 
 
+def _update_registry(mutator):
+    """Apply one read-modify-write under the registry lock."""
+    path = _registry_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path + ".lock"):
+        registry = _load_registry()
+        result = mutator(registry)
+        atomic_write_json(path, registry)
+        return result
+
+
+def record_cli_pid(project: str, dispatch_id: str, pid: int) -> bool:
+    """Persist the real CLI process independently of the mutable current Task."""
+    def update(registry: dict) -> bool:
+        for worker in registry.get("workers", []):
+            if worker.get("project") == project and worker.get("dispatch_id") == dispatch_id:
+                worker.update({
+                    "cli_pid": int(pid),
+                    "cli_started_at": datetime.now().isoformat(timespec="seconds"),
+                })
+                return True
+        return False
+
+    return _update_registry(update)
+
+
 def _pid_alive(pid: int | None) -> bool:
     try:
         os.kill(int(pid), 0)
@@ -105,23 +131,24 @@ def claim_task(project: str, task_id: str, dispatch_id: str, driver: str, agent:
 
 
 def reap_workers() -> dict:
-    registry = _load_registry()
-    live, finished = [], []
-    for worker in registry.get("workers", []):
-        if _pid_alive(worker.get("pid")):
-            live.append(worker)
-            continue
-        result = {}
-        if os.path.exists(worker.get("result_file", "")):
-            try:
-                with open(worker["result_file"], encoding="utf-8") as file:
-                    result = json.load(file)
-            except (OSError, json.JSONDecodeError):
-                pass
-        finished.append({**worker, "result": result})
-    registry["workers"] = live
-    _save_registry(registry)
-    return {"live": live, "finished": finished}
+    def reap(registry: dict) -> dict:
+        live, finished = [], []
+        for worker in registry.get("workers", []):
+            if _pid_alive(worker.get("pid")):
+                live.append(worker)
+                continue
+            result = {}
+            if os.path.exists(worker.get("result_file", "")):
+                try:
+                    with open(worker["result_file"], encoding="utf-8") as file:
+                        result = json.load(file)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            finished.append({**worker, "result": result})
+        registry["workers"] = live
+        return {"live": live, "finished": finished}
+
+    return _update_registry(reap)
 
 
 def _driver_for(project: str, state: dict) -> str | None:
@@ -286,20 +313,20 @@ def _stop_open_circuit_workers(live: list[dict], grace_seconds: int = 30) -> lis
         try:
             state = af.load_state(worker["project"])
             task = state.get("task") or {}
-            if task.get("id") == worker.get("task_id"):
-                cli_pid = (task.get("execution") or {}).get("cli_pid")
-                if cli_pid and _pid_alive(cli_pid):
-                    os.killpg(int(cli_pid), sig)
+            current_cli_pid = (task.get("execution") or {}).get("cli_pid") if task.get("id") == worker.get("task_id") else None
+            cli_pid = worker.get("cli_pid") or current_cli_pid
+            if cli_pid and int(cli_pid) != int(worker["pid"]) and _pid_alive(cli_pid):
+                os.killpg(int(cli_pid), sig)
             os.killpg(int(worker["pid"]), sig)
             worker["stop_requested_at"] = requested or now.isoformat(timespec="seconds")
             actions.append({"project": worker["project"], "task_id": worker["task_id"], "signal": sig.name})
         except (OSError, ValueError):
             pass
     if actions:
-        registry = _load_registry()
         by_dispatch = {item["dispatch_id"]: item for item in live}
-        registry["workers"] = [by_dispatch.get(item.get("dispatch_id"), item) for item in registry.get("workers", [])]
-        _save_registry(registry)
+        _update_registry(lambda registry: registry.update({
+            "workers": [by_dispatch.get(item.get("dispatch_id"), item) for item in registry.get("workers", [])]
+        }))
     return actions
 
 
@@ -320,8 +347,8 @@ def _stop_revoked_workers(live: list[dict]) -> list[dict]:
             )
             if authorized:
                 continue
-            cli_pid = execution.get("cli_pid")
-            if cli_pid and _pid_alive(cli_pid):
+            cli_pid = worker.get("cli_pid") or execution.get("cli_pid")
+            if cli_pid and int(cli_pid) != int(worker["pid"]) and _pid_alive(cli_pid):
                 os.killpg(int(cli_pid), signal.SIGTERM)
             os.killpg(int(worker["pid"]), signal.SIGTERM)
             actions.append({
@@ -445,9 +472,7 @@ def _spawn(project: str, state: dict, driver: str) -> dict:
         "status": "running", "started_at": worker["started_at"],
     })
     af.save_state(project, fresh)
-    registry = _load_registry()
-    registry.setdefault("workers", []).append(worker)
-    _save_registry(registry)
+    _update_registry(lambda registry: registry.setdefault("workers", []).append(worker))
     atomic_write_json(gate_file, {"ready": True})
     return {**worker, "status": "started"}
 

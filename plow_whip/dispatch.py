@@ -297,6 +297,10 @@ def _record_running_pid(project: str, driver: str, dispatch_id: str | None, pid:
         })
         try:
             af.save_state(project, state)
+            from . import supervisor
+
+            if dispatch_id and not supervisor.record_cli_pid(project, dispatch_id, pid):
+                raise RuntimeError(f"worker registry lost dispatch {dispatch_id} before {driver} pid={pid} started")
             return
         except RuntimeError:
             continue

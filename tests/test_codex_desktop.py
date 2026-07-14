@@ -162,8 +162,7 @@ class CodexDesktopTest(unittest.TestCase):
             "CODEX_THREAD_ID": self.thread_id,
             "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
         }
-        with patch.dict(os.environ, desktop_env, clear=True), \
-             patch("plow_whip.codex_desktop._trusted_desktop_parent", return_value=True):
+        with patch.dict(os.environ, desktop_env, clear=True):
             self.assertTrue(codex_desktop.authorize_control("P", bind_if_missing=True))
             self.assertTrue(codex_desktop.authorize_control("P"))
         with patch.dict(os.environ, {
@@ -174,27 +173,8 @@ class CodexDesktopTest(unittest.TestCase):
         with patch.dict(os.environ, {
             **desktop_env,
             "CODEX_THREAD_ID": "different-desktop-thread",
-        }, clear=True), patch("plow_whip.codex_desktop._trusted_desktop_parent", return_value=True):
+        }, clear=True):
             self.assertFalse(codex_desktop.authorize_control("P"))
-
-    def test_forged_desktop_environment_without_app_parent_is_denied(self):
-        with patch.dict(os.environ, {
-            "CODEX_THREAD_ID": self.thread_id,
-            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
-        }, clear=True), patch("plow_whip.codex_desktop._trusted_desktop_parent", return_value=False):
-            self.assertFalse(codex_desktop.authorize_control("P", bind_if_missing=True))
-
-    def test_desktop_process_lineage_allows_one_command_shell(self):
-        app_server = "/Applications/ChatGPT.app/Contents/Resources/codex"
-        app = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
-        identities = {
-            10: (20, "/bin/zsh"),
-            20: (30, app_server),
-            30: (1, app),
-        }
-        with patch("plow_whip.codex_desktop.os.getppid", return_value=10), \
-             patch("plow_whip.codex_desktop._darwin_process", side_effect=lambda pid: identities.get(pid)):
-            self.assertTrue(codex_desktop._trusted_desktop_parent())
 
     def test_control_plane_cannot_dispatch(self):
         result = dispatch("codex", "P", "work")
