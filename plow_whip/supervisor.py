@@ -311,7 +311,7 @@ def _stop_revoked_workers(live: list[dict]) -> list[dict]:
                 task.get("id") == worker.get("task_id")
                 and task.get("status") in ("active", "in_progress")
                 and execution.get("dispatch_id") == worker.get("dispatch_id")
-                and (not leases.is_strict(af.load_protocol(worker["project"])) or lease.get("status") == "active")
+                and (not leases.is_strict(af.load_protocol(worker["project"])) or leases.metadata_active(lease))
             )
             if authorized:
                 continue
@@ -326,6 +326,68 @@ def _stop_revoked_workers(live: list[dict]) -> list[dict]:
         except (OSError, ValueError, KeyError):
             continue
     return actions
+
+
+def renew_live_leases(live: list[dict]) -> list[dict]:
+    """Extend signed metadata for live strict workers without replacing tokens."""
+    renewed = []
+    for worker in live:
+        if not _pid_alive(worker.get("pid")):
+            continue
+        for _ in range(3):
+            try:
+                project = worker["project"]
+                state = af.load_state(project)
+                protocol = af.load_protocol(project)
+                if not leases.is_strict(protocol):
+                    break
+                task = state.get("task") or {}
+                execution = task.get("execution") or {}
+                lease = execution.get("lease") or {}
+                ttl = max(60, int(protocol.get("orchestration", {}).get(
+                    "lease_ttl_seconds", leases.DEFAULT_TTL_SECONDS,
+                )))
+                try:
+                    expires_at = datetime.fromisoformat(str(lease.get("expires_at") or ""))
+                    remaining = (expires_at - datetime.now()).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    remaining = -1
+                if (
+                    task.get("id") != worker.get("task_id")
+                    or task.get("status") not in ("active", "in_progress")
+                    or execution.get("status") not in ("starting", "running")
+                    or execution.get("dispatch_id") != worker.get("dispatch_id")
+                    or execution.get("worker_pid") != worker.get("pid")
+                    or lease.get("status") != "active"
+                    or remaining > ttl / 2
+                ):
+                    break
+                now = datetime.now()
+                lease.update({
+                    "expires_at": (now + timedelta(seconds=ttl)).isoformat(timespec="seconds"),
+                    "renewed_at": now.isoformat(timespec="seconds"),
+                    "renewals": int(lease.get("renewals", 0)) + 1,
+                })
+                execution["lease"] = lease
+                task["execution"] = execution
+                state["task"] = task
+                af.save_state(project, state)
+                leases.audit(
+                    af.CONFIG_DIR, project, "lease_renewed",
+                    task_id=task.get("id"), dispatch_id=execution.get("dispatch_id"), lease_id=lease.get("id"),
+                )
+                renewed.append({
+                    "project": project, "task_id": task.get("id"),
+                    "dispatch_id": execution.get("dispatch_id"), "expires_at": lease["expires_at"],
+                })
+                break
+            except leases.StateIntegrityError:
+                break
+            except RuntimeError:
+                continue
+            except KeyError:
+                break
+    return renewed
 
 
 def _spawn(project: str, state: dict, driver: str) -> dict:
@@ -389,6 +451,7 @@ def dispatch_projects(projects: list[str]) -> dict:
     """Reap, probe open circuits, enforce limits, and spawn one worker per eligible Task."""
     reaped = reap_workers()
     probes = health.probe_open_circuits(af.CONFIG_DIR, required=3)
+    renewed = renew_live_leases(reaped["live"])
     stopped = _stop_open_circuit_workers(reaped["live"])
     stopped.extend(_stop_revoked_workers(reaped["live"]))
     live = [item for item in reaped["live"] if _pid_alive(item.get("pid"))]
@@ -438,13 +501,20 @@ def dispatch_projects(projects: list[str]) -> dict:
             })
             continue
         driver = _driver_for(project, state)
+        protocol = af.load_protocol(project)
+        if leases.is_strict(protocol) and driver == "zellij":
+            outcomes.append({
+                "project": project, "task_id": task.get("id"), "status": "paused_unsupported_driver",
+                "driver": driver, "detail": "strict workers require a lease-capable CLI driver; zellij is legacy-only",
+            })
+            continue
         if driver not in health.DRIVERS and driver != "zellij":
             outcomes.append({"project": project, "task_id": task.get("id"), "status": "skipped_no_cli", "driver": driver})
             continue
         if driver in health.DRIVERS and health.is_open(af.CONFIG_DIR, driver):
             outcomes.append({"project": project, "task_id": task.get("id"), "status": "paused_circuit", "driver": driver})
             continue
-        maximum = int(af.load_protocol(project).get("orchestration", {}).get("max_concurrency_per_driver", 5))
+        maximum = int(protocol.get("orchestration", {}).get("max_concurrency_per_driver", 5))
         if counts.get(driver, 0) >= maximum:
             outcomes.append({"project": project, "task_id": task.get("id"), "status": "queued_concurrency", "driver": driver})
             continue
@@ -453,4 +523,7 @@ def dispatch_projects(projects: list[str]) -> dict:
         if started.get("status") == "started":
             live.append(started)
             counts[driver] = counts.get(driver, 0) + 1
-    return {"workers": outcomes, "finished": reaped["finished"], "health_probes": probes, "stopped": stopped, "counts": counts}
+    return {
+        "workers": outcomes, "finished": reaped["finished"], "health_probes": probes,
+        "renewed": renewed, "stopped": stopped, "counts": counts,
+    }

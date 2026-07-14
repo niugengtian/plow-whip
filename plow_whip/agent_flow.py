@@ -2004,6 +2004,11 @@ def cmd_goal(project, args):
         if not raw[-1].get("final_acceptance"):
             raise ValueError("last milestone must declare final_acceptance=true")
         milestones = []
+        executable_drivers = (
+            ("codex_cli", "cursor_cli")
+            if leases.is_strict(data)
+            else ("codex_cli", "cursor_cli", "zellij")
+        )
         implementation_owners = set()
         for index, item in enumerate(raw, 1):
             final = index == len(raw)
@@ -2014,11 +2019,13 @@ def cmd_goal(project, args):
             owner = item.get("owner")
             if owner and owner not in proto.schedulable_agents(data):
                 raise ValueError(f"milestone owner is unknown or non-schedulable: {owner}")
+            if owner and data["agents"][owner].get("driver") not in executable_drivers:
+                raise ValueError(f"milestone owner cannot carry a strict execution lease: {owner}")
             if not owner:
                 owner = routing.select_agent(
                     data, role=role, capabilities=capabilities,
                     exclude_agents=implementation_owners if final else None,
-                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                    driver_available=lambda driver: driver in executable_drivers,
                 )
             if not owner:
                 raise ValueError(f"no executable agent matches role={role} capabilities={capabilities}")
@@ -2026,7 +2033,7 @@ def cmd_goal(project, args):
                 independent_owner = routing.select_agent(
                     data, role=role, capabilities=capabilities,
                     exclude_agents=implementation_owners,
-                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                    driver_available=lambda driver: driver in executable_drivers,
                 )
                 if independent_owner:
                     owner = independent_owner

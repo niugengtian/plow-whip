@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import plow_whip.agent_flow as af
@@ -114,6 +115,37 @@ class SupervisorTest(unittest.TestCase):
         self.assertTrue(first["claimed"])
         self.assertFalse(second["claimed"])
         self.assertIn("already executing", second["detail"])
+
+    def test_live_strict_worker_lease_is_renewed(self):
+        state = af.load_state("P0")
+        state["task"]["placeholder"] = False
+        af.save_state("P0", state)
+        claim = supervisor.claim_task("P0", state["task"]["id"], "DP-live", "codex_cli", "codex_cli")
+        self.assertTrue(claim["claimed"])
+        state = af.load_state("P0")
+        state["task"]["execution"].update({"status": "running", "worker_pid": 999})
+        state["task"]["execution"]["lease"]["expires_at"] = (datetime.now() + timedelta(seconds=30)).isoformat(timespec="seconds")
+        af.save_state("P0", state)
+        worker = {"project": "P0", "task_id": state["task"]["id"], "dispatch_id": "DP-live", "pid": 999}
+
+        with patch("plow_whip.supervisor._pid_alive", return_value=True):
+            renewed = supervisor.renew_live_leases([worker])
+
+        lease = af.load_state("P0")["task"]["execution"]["lease"]
+        self.assertEqual(len(renewed), 1)
+        self.assertEqual(lease["renewals"], 1)
+        self.assertGreater(datetime.fromisoformat(lease["expires_at"]), datetime.now() + timedelta(minutes=30))
+
+    def test_strict_scheduler_rejects_zellij_worker(self):
+        state = af.load_state("P0")
+        state["task"].update({"placeholder": False, "requested_driver": "zellij"})
+        af.save_state("P0", state)
+        with patch("plow_whip.supervisor.reap_workers", return_value={"live": [], "finished": []}), \
+             patch("plow_whip.supervisor.health.probe_open_circuits", return_value={}), \
+             patch("plow_whip.supervisor._spawn") as spawn:
+            result = supervisor.dispatch_projects(["P0"])
+        self.assertEqual(result["workers"][0]["status"], "paused_unsupported_driver")
+        spawn.assert_not_called()
 
     def test_branch_only_delivery_waits_then_detects_human_merge(self):
         state = af.load_state("P0")

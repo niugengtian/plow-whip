@@ -285,6 +285,13 @@ class TestDispatchMain(DispatchTestBase):
         self.assertIn("'\"'\"'", command)
         self.assertIn("'P one'", command)
 
+    def test_strict_dispatch_rejects_zellij_and_closes_ledger(self):
+        af.cmd_init("P1")
+        result = dispatch("cursor_cli", "P1", "work", force_channel="zellij")
+        self.assertFalse(result["success"])
+        self.assertIn("legacy-only", result["detail"])
+        self.assertEqual(read_inbox("cursor_cli")[0]["status"], "failed")
+
     @patch("plow_whip.dispatch._dispatch_notify")
     def test_direct_channel_keeps_shared_lifecycle_record(self, mock_notify):
         mock_notify.return_value = {"success": True, "channel": "notify", "detail": "OK"}

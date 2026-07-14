@@ -217,7 +217,7 @@ def issue(
     return token, metadata
 
 
-def decode(config_dir: str, token: str) -> dict:
+def decode(config_dir: str, token: str, *, check_expiry: bool = True) -> dict:
     try:
         encoded, supplied = token.split(".", 1)
         expected = hmac.new(_secret(config_dir), encoded.encode(), hashlib.sha256).digest()
@@ -230,9 +230,20 @@ def decode(config_dir: str, token: str) -> dict:
         raise LeaseDenied("lease token is malformed") from exc
     if payload.get("v") != LEASE_VERSION or payload.get("kind") != "worker":
         raise LeaseDenied("lease token version or kind is unsupported")
-    if int(payload.get("expires_at", 0)) <= int(time.time()):
+    if check_expiry and int(payload.get("expires_at", 0)) <= int(time.time()):
         raise LeaseDenied("lease has expired")
     return payload
+
+
+def metadata_active(lease: dict, *, now: float | None = None) -> bool:
+    """Return whether authority-signed lease metadata is active and unexpired."""
+    if lease.get("status") != "active":
+        return False
+    try:
+        expires_at = datetime.fromisoformat(str(lease.get("expires_at") or ""))
+        return expires_at.timestamp() > (time.time() if now is None else now)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def validate(
@@ -248,7 +259,10 @@ def validate(
     token = token or os.environ.get(TOKEN_ENV)
     if not token:
         raise LeaseDenied("no execution lease; this session is observer-only")
-    payload = decode(config_dir, token)
+    # The token proves the worker identity. Its lifetime can be extended only
+    # through the signed canonical state, so a live child need not receive a
+    # replacement environment variable during a long-running attempt.
+    payload = decode(config_dir, token, check_expiry=False)
     task = state.get("task") or {}
     execution = task.get("execution") or {}
     lease = execution.get("lease") or {}
@@ -256,6 +270,7 @@ def validate(
         "project": project,
         "task_id": task.get("id"),
         "agent": task.get("owner"),
+        "driver": execution.get("driver"),
         "dispatch_id": execution.get("dispatch_id"),
         "generation": lease.get("generation"),
         "protocol_epoch": protocol_epoch(protocol),
@@ -265,7 +280,7 @@ def validate(
             raise LeaseDenied(f"lease {key} does not match the active task")
     if agent and payload.get("agent") != agent:
         raise LeaseDenied("lease is bound to another agent")
-    if lease.get("id") != token_ref(token) or lease.get("status") != "active":
+    if lease.get("id") != token_ref(token) or not metadata_active(lease):
         raise LeaseDenied("lease is no longer active")
     return payload
 

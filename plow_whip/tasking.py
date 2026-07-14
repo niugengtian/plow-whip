@@ -160,26 +160,33 @@ def planner_owner(data: dict, preferred: str | None = None) -> str:
     if (not meta or not meta.get("enabled", True) or not meta.get("schedulable", True)
             or "planner" not in meta.get("roles", [])):
         raise ValueError(f"configured planner is not an enabled planner: {selected}")
+    if leases.is_strict(data) and meta.get("driver") not in ("codex_cli", "cursor_cli"):
+        raise ValueError(f"configured planner cannot carry a strict execution lease: {selected}")
     return selected
 
 
 def _review_task(data: dict, root_id: str, title: str, implementation_owner: str) -> dict:
     implementation = data.get("agents", {}).get(implementation_owner, {})
     implementation_driver = implementation.get("driver")
+    executable_drivers = (
+        ("codex_cli", "cursor_cli", "simple_tasker")
+        if leases.is_strict(data)
+        else ("codex_cli", "cursor_cli", "simple_tasker", "zellij")
+    )
     choices = routing.candidates(
         data, role="reviewer", capabilities=["review"],
         exclude_agents={implementation_owner}, exclude_drivers={implementation_driver},
-        driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "simple_tasker", "zellij"),
+        driver_available=lambda driver: driver in executable_drivers,
     )
     if not choices:
         choices = routing.candidates(
             data, role="reviewer", capabilities=["review"], exclude_agents={implementation_owner},
-            driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "simple_tasker", "zellij"),
+            driver_available=lambda driver: driver in executable_drivers,
         )
     if not choices:
         choices = routing.candidates(
             data, role="reviewer", capabilities=["review"],
-            driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "simple_tasker", "zellij"),
+            driver_available=lambda driver: driver in executable_drivers,
         )
     if not choices:
         raise ValueError("no executable reviewer is configured")
@@ -275,6 +282,11 @@ def _plan_milestones(data: dict, workflow: dict, raw: list[dict]) -> list[dict]:
     if not raw[-1].get("final_acceptance"):
         raise ValueError("last milestone must declare final_acceptance=true")
     milestones = []
+    executable_drivers = (
+        ("codex_cli", "cursor_cli")
+        if leases.is_strict(data)
+        else ("codex_cli", "cursor_cli", "zellij")
+    )
     implementation_agents: set[str] = set()
     implementation_drivers: set[str] = set()
     for index, item in enumerate(raw, 1):
@@ -289,9 +301,13 @@ def _plan_milestones(data: dict, workflow: dict, raw: list[dict]) -> list[dict]:
         requested_driver = _requested_driver("", item.get("cli")) if item.get("cli") else None
         if requested_driver == "simple_tasker":
             raise ValueError("planner-to-simple-tasker milestone routing is reserved for a future version")
+        if requested_driver and requested_driver not in executable_drivers:
+            raise ValueError(f"milestone driver cannot carry a strict execution lease: {requested_driver}")
         if owner:
             if owner not in proto.schedulable_agents(data):
                 raise ValueError(f"milestone owner is unknown or non-schedulable: {owner}")
+            if data["agents"][owner].get("driver") not in executable_drivers:
+                raise ValueError(f"milestone owner cannot carry a strict execution lease: {owner}")
         elif requested_driver:
             owner = _agent_for_driver(data, requested_driver, role=role)
         else:
@@ -299,17 +315,17 @@ def _plan_milestones(data: dict, workflow: dict, raw: list[dict]) -> list[dict]:
                 data, role=role, capabilities=capabilities,
                 exclude_agents=implementation_agents if final else None,
                 exclude_drivers=implementation_drivers if final else None,
-                driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                driver_available=lambda driver: driver in executable_drivers,
             )
             if not choices and final:
                 choices = routing.candidates(
                     data, role=role, capabilities=capabilities, exclude_agents=implementation_agents,
-                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                    driver_available=lambda driver: driver in executable_drivers,
                 )
             if not choices:
                 choices = routing.candidates(
                     data, role=role, capabilities=capabilities,
-                    driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                    driver_available=lambda driver: driver in executable_drivers,
                 )
             if not choices:
                 raise ValueError(f"no executable agent matches role={role} capabilities={capabilities}")
@@ -318,7 +334,7 @@ def _plan_milestones(data: dict, workflow: dict, raw: list[dict]) -> list[dict]:
             alternatives = routing.candidates(
                 data, role=role, capabilities=capabilities,
                 exclude_agents=implementation_agents, exclude_drivers=implementation_drivers,
-                driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "zellij"),
+                driver_available=lambda driver: driver in executable_drivers,
             )
             if alternatives:
                 owner = alternatives[0]["agent"]

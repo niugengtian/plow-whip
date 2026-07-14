@@ -190,10 +190,11 @@ plow-whip scheduler status
 
 - `codex_cli` 和 `cursor_cli` Driver 可以在 CLI 已安装、已认证且权限充足时真实执行任务。
 - `simple_tasker` 复用现有 DeepSeek Brain API 客户端，但增加项目沙箱工具、Task 级 JSONL 会话、断点恢复和自动上下文压缩；生产 Key 只读取环境变量。
-- `zellij` 依赖可用的本地会话；`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
+- `zellij` 依赖可用的本地会话且无法安全继承 Worker 租约，因此只保留旧模式兼容；严格模式只调度可携带租约的 CLI Driver。`file` 只写 inbox，必须由外部客户端接管，不能单独称为端到端无人值守。
 - Desktop Agent 没有可执行通道时，只进入 inbox 或系统通知等待接管。
 - 新项目中的 Codex Desktop 和默认 Cursor Desktop 是控制面：可 `submit`、查看状态、确认计划和答复决策，但没有 Worker 租约。
-- 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 固定 strict 模式与 `protocol_epoch`，状态和日志只保存不可逆 lease ID，不保存 Token。
+- 租约签名密钥和协议 authority pin 位于本机配置目录，模式为 `0600`；pin 固定 strict 模式与 `protocol_epoch`，状态和日志只保存不可逆 lease ID，不保存 Token。活跃 Worker 的签名租约元数据由 scheduler 续期，长任务无需更换进程环境中的 Token。
+- Codex Desktop 的提交、确认和决策权限同时要求绑定 Thread 与可信 Desktop App 进程父链；伪造 `CODEX_THREAD_ID` 或 origin 环境变量不能获得控制权。
 - Worker worktree 的 push URL 被禁用；发布由 scheduler 父进程从控制 checkout 完成。目标分支自动更新默认关闭，未配置受保护身份时只推送 `plow/*` 分支。
 - `blocked` 和 `done` 永不自动派发。任务需要外部凭据、人工审批或产品决策时，应明确 block，而不是绕过边界。
 - API Key/Profile 池只对认证、额度和限流错误切换。网络或服务异常打开对应 CLI 的独立熔断器，不累计 Task 重试；连续三次无 Token 探测成功后自动恢复。

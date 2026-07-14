@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -52,13 +53,63 @@ def _load_checkpoint(project: str) -> dict:
         return {}
 
 
+def _darwin_process(pid: int) -> tuple[int, str] | None:
+    """Read one macOS process identity without invoking ps or trusting env."""
+    if sys.platform != "darwin" or pid <= 0:
+        return None
+    try:
+        import ctypes
+        import struct
+
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        info = ctypes.create_string_buffer(136)
+        if libproc.proc_pidinfo(pid, 3, 0, info, len(info)) < 20:  # PROC_PIDTBSDINFO
+            return None
+        parent_pid = struct.unpack_from("=I", info.raw, 16)[0]
+        path = ctypes.create_string_buffer(4096)
+        if libproc.proc_pidpath(pid, path, len(path)) <= 0:
+            return None
+        return parent_pid, os.fsdecode(path.value)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _trusted_desktop_parent() -> bool:
+    """Prove this command is the Desktop app's direct command child."""
+    parent = _darwin_process(os.getppid())
+    if not parent:
+        return False
+    launcher_pid, parent_path = parent
+    # Desktop tool commands may have exactly one shell between the app server
+    # and the executable. Workers have their scheduler/worker process here and
+    # therefore cannot satisfy this shape merely by copying environment values.
+    if parent_path in ("/bin/zsh", "/bin/bash", "/bin/sh"):
+        launcher = _darwin_process(launcher_pid)
+        if not launcher:
+            return False
+        launcher_pid, parent_path = launcher
+    app = _darwin_process(launcher_pid)
+    if not app or not parent_path.endswith("/Contents/Resources/codex"):
+        return False
+    _, app_path = app
+    app_names = ("/Contents/MacOS/ChatGPT", "/Contents/MacOS/Codex")
+    if not app_path.endswith(app_names):
+        return False
+    bundle = parent_path.split("/Contents/", 1)[0]
+    if bundle not in ("/Applications/ChatGPT.app", "/Applications/Codex.app"):
+        return False
+    return bundle == app_path.split("/Contents/", 1)[0]
+
+
 def authorize_control(project: str, *, bind_if_missing: bool = False) -> bool:
     """Authenticate the current Codex Desktop thread as the human control plane.
 
-    Worker processes do not inherit either Desktop identity variable.  The raw
-    thread ID is kept in the user-level checkpoint; project state exposes only
-    its irreversible reference.
+    Environment identity is accepted only when the caller also has the native
+    Desktop app process lineage.  The raw thread ID remains in the user-level
+    checkpoint; project state exposes only its irreversible reference.
     """
+    if not _trusted_desktop_parent():
+        return False
     thread_id = _environment_thread_id(allow_env=True)
     if not thread_id:
         return False

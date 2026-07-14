@@ -916,6 +916,7 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     task_id = kwargs.pop("task_id", None)
     if task_id is None and os.path.exists(af.state_file(project)):
         task_id = af.load_state(project).get("task", {}).get("id", "T-001")
+    strict = os.path.exists(af.protocol_file(project)) and leases.is_strict(af.load_protocol(project))
     ledger = _dispatch_file(agent, prompt, project, dispatch_id=dispatch_id, task_id=task_id)
 
     if force_channel:
@@ -930,6 +931,12 @@ def dispatch(agent: str, project: str, prompt: str, force_channel: str = None, *
     failures = []
     for ch in channels:
         route = next((item for item in routes if item["driver"] == ch), {"agent": agent, "driver": ch}) if not force_channel else {"agent": agent, "driver": ch}
+        if ch == "zellij" and strict:
+            failures.append({
+                "channel": ch,
+                "detail": "strict workers require a lease-capable CLI driver; zellij is legacy-only",
+            })
+            continue
         if ch in ("cursor_cli", "codex_cli", "simple_tasker") and task_id:
             from . import supervisor
 

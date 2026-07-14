@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 import plow_whip.agent_flow as af
@@ -183,6 +184,39 @@ class ProtocolSchedulerTest(unittest.TestCase):
             leases.validate(
                 af.CONFIG_DIR, "P", af.load_state("P"), af.load_protocol("P"),
                 token=first["lease_token"], agent="codex_cli",
+            )
+
+    def test_signed_state_can_renew_a_live_token_beyond_original_expiry(self):
+        state = af.load_state("P")
+        state["task"]["placeholder"] = False
+        af.save_state("P", state)
+        claim = supervisor.claim_task("P", "T-001", "DP-renew", "codex_cli", "codex_cli")
+        payload = leases.decode(af.CONFIG_DIR, claim["lease_token"])
+        future = payload["expires_at"] + 120
+        state = af.load_state("P")
+        state["task"]["execution"]["lease"]["expires_at"] = datetime.fromtimestamp(future + 60).isoformat(timespec="seconds")
+        af.save_state("P", state)
+
+        with patch("plow_whip.leases.time.time", return_value=future):
+            validated = leases.validate(
+                af.CONFIG_DIR, "P", af.load_state("P"), af.load_protocol("P"),
+                token=claim["lease_token"], agent="codex_cli",
+            )
+        self.assertEqual(validated["dispatch_id"], "DP-renew")
+
+    def test_expired_signed_lease_metadata_is_rejected(self):
+        state = af.load_state("P")
+        state["task"]["placeholder"] = False
+        af.save_state("P", state)
+        claim = supervisor.claim_task("P", "T-001", "DP-expired", "codex_cli", "codex_cli")
+        state = af.load_state("P")
+        state["task"]["execution"]["lease"]["expires_at"] = (datetime.now() - timedelta(seconds=1)).isoformat(timespec="seconds")
+        af.save_state("P", state)
+
+        with self.assertRaisesRegex(leases.LeaseDenied, "no longer active"):
+            leases.validate(
+                af.CONFIG_DIR, "P", af.load_state("P"), af.load_protocol("P"),
+                token=claim["lease_token"], agent="codex_cli",
             )
 
     def test_protocol_authority_pin_rejects_strict_mode_downgrade(self):
@@ -411,6 +445,11 @@ class ProtocolSchedulerTest(unittest.TestCase):
         finalize.assert_not_called()
 
     def test_goal_plan_advances_coarse_milestones_and_finishes_only_at_end(self):
+        data = af.load_protocol("P")
+        data["agents"]["builder"] = protocol.normalize_agent("builder", {
+            "roles": ["implementation"], "driver": "cursor_cli",
+        })
+        protocol.save(af.project_dir("P"), data)
         af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         state = af.load_state("P")
         self.assertEqual(state["goal"]["status"], "planning")
@@ -435,6 +474,15 @@ class ProtocolSchedulerTest(unittest.TestCase):
         state = af.load_state("P")
         self.assertEqual(state["goal"]["status"], "done")
         self.assertEqual(state["task"]["status"], "done")
+
+    def test_goal_plan_rejects_non_lease_capable_owner_in_strict_mode(self):
+        af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli", replace=False))
+        plan = [
+            {"title": "Build in desktop tab", "owner": "builder", "acceptance": ["built"]},
+            {"title": "Review", "owner": "codex_cli", "acceptance": ["reviewed"], "final_acceptance": True},
+        ]
+        with self.assertRaisesRegex(ValueError, "cannot carry a strict execution lease"):
+            af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_compatibility_path_uses_configured_default_planner(self):
         data = af.load_protocol("P")
@@ -547,6 +595,11 @@ class ProtocolSchedulerTest(unittest.TestCase):
             af.cmd_goal("P", FakeArgs(action="plan", context_summary="x", plan_json=json.dumps(plan)))
 
     def test_goal_does_not_advance_when_current_milestone_fails_verification(self):
+        data = af.load_protocol("P")
+        data["agents"]["builder"] = protocol.normalize_agent("builder", {
+            "roles": ["implementation"], "driver": "cursor_cli",
+        })
+        protocol.save(af.project_dir("P"), data)
         af.cmd_goal("P", FakeArgs(action="start", text="Ship feature", owner="codex_cli"))
         plan = [
             {"title": "Build", "owner": "builder", "acceptance": ["passes"], "verify_commands": ["test"]},

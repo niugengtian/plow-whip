@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 
 from . import agent_flow as af
-from . import health, routing, tasking
+from . import health, leases, routing, tasking
 from .dispatch import dispatch
 from .drive import build_drive_prompt
 from .io_utils import atomic_write_json
@@ -22,12 +22,17 @@ def _fallback(project: str, current_driver: str) -> dict | None:
     excluded = {current_driver}
     if current_driver != "simple_tasker":
         excluded.add("simple_tasker")
+    executable_drivers = (
+        ("codex_cli", "cursor_cli", "simple_tasker")
+        if leases.is_strict(data)
+        else ("codex_cli", "cursor_cli", "simple_tasker", "zellij")
+    )
     choices = routing.candidates(
         data,
         role=task.get("required_role"),
         capabilities=task.get("required_capabilities"),
         exclude_drivers=excluded,
-        driver_available=lambda driver: driver in ("codex_cli", "cursor_cli", "simple_tasker", "zellij"),
+        driver_available=lambda driver: driver in executable_drivers,
     )
     return choices[0] if choices else None
 
