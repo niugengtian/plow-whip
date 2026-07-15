@@ -122,19 +122,54 @@ def cmd_drive(project: str, args) -> None:
     )
     channel = getattr(args, "channel", "auto") or "auto"
 
+    from . import codex_desktop
+
+    foreground = bool(getattr(args, "foreground", False))
+    if foreground and codex_desktop.authorize_control(project):
+        print(
+            "错误: controller 禁止前台 babysit 执行会话；请移除 --foreground，派发落盘后立即结束 turn。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     print(f"\n🪢 plow-whip drive → {target} (project: {project})")
     print(f"📋 任务: {task[:120]}{'...' if len(task) > 120 else ''}")
     print(f"📤 请求方: {requested_by}")
     print(f"📍 路径: {project_path}\n")
 
-    force = None if channel == "auto" else channel
-    result = dispatch(
-        target,
-        project,
-        prompt,
-        force_channel=force,
-        dispatch_id=dispatch_id,
-    )
+    if foreground:
+        force = None if channel == "auto" else channel
+        result = dispatch(
+            target, project, prompt, force_channel=force, dispatch_id=dispatch_id,
+        )
+    else:
+        state = af.load_state(project)
+        task = state.get("task") or {}
+        if task.get("owner") != target:
+            print(
+                f"错误: 当前 Task owner={task.get('owner')}，不能短路派发给 {target}；请先用 handoff/submit 更新任务真源。",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        driver = af.load_protocol(project).get("agents", {}).get(target, {}).get("driver", "file")
+        if driver in ("codex_cli", "cursor_cli", "simple_tasker"):
+            from . import supervisor
+
+            outcome = supervisor.dispatch_projects([project])
+            result = next(
+                (item for item in outcome.get("workers", []) if item.get("project") == project),
+                {"status": "queued"},
+            )
+            result = {
+                "success": result.get("status") in ("started", "skipped_running"),
+                "channel": driver,
+                "detail": result.get("status", "queued"),
+                **result,
+            }
+        else:
+            result = dispatch(
+                target, project, prompt, force_channel="file", dispatch_id=dispatch_id,
+            )
     status = "OK" if result["success"] else "FAIL"
     print(f"  [{status}] {result['channel']}: {result['detail']}")
     if result.get("session_id"):

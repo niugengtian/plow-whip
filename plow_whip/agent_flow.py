@@ -1749,7 +1749,7 @@ def cmd_context_pack(project, args):
         print(json.dumps(pack, ensure_ascii=False, indent=2))
 
 
-def build_start_pack(project, agent=None):
+def build_start_pack(project, agent=None, controller_view=None):
     """Return compact English JSON; local safety checks consume no model tokens."""
     report = build_doctor_report(project)
     if not report["ok"]:
@@ -1820,6 +1820,8 @@ def build_start_pack(project, agent=None):
         "rules": proto.compact_rules(data, agent, raw_task, START_PACK_MAX_RULES),
         "messages": messages,
     }
+    if controller_view:
+        pack["controller"] = controller_view
     if authorization["execution_allowed"]:
         pack["commands"] = {
             "progress": f"plow-whip --project {project} task progress --output '...' --next '...'",
@@ -1865,7 +1867,26 @@ def build_start_pack(project, agent=None):
 
 
 def cmd_start(project, args):
-    payload = build_start_pack(project, getattr(args, "agent", None))
+    from . import codex_desktop
+    from . import controller
+
+    agent = getattr(args, "agent", None)
+    registration = codex_desktop.register_control_session(project, agent)
+    controller_view = controller.start_pack(project) if registration.get("is_controller") else None
+    payload = build_start_pack(project, agent, controller_view=controller_view)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def cmd_controller(project, args):
+    from . import controller
+
+    if args.action == "consume":
+        payload = controller.consume(project, args.event_id)
+    else:
+        payload = {
+            "project": project,
+            "pending": controller.pending(project),
+        }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -2298,6 +2319,22 @@ def cmd_task(project, args):
     state["current_agent"] = task.get("owner", state.get("current_agent"))
     state["assigned_agent"] = state["current_agent"]
     save_state(project, state)
+    if args.action == "complete" and completed_task.get("status") == "done":
+        execution = completed_task.get("execution") or {}
+        dispatch_id = execution.get("dispatch_id")
+        if dispatch_id:
+            from . import controller
+
+            try:
+                controller.record_dispatch_result(
+                    project, completed_task.get("id"), dispatch_id,
+                    success=True, result_ref=state_file(project),
+                    execution_agent=completed_task.get("owner"),
+                    evidence={"source": "task_truth", "task_status": "done"},
+                )
+            except OSError:
+                # The scheduler reconstructs this receipt from task truth.
+                pass
     if action == "complete" and completed_task.get("status") == "done" and not goal:
         _archive_task_sessions(project, completed_task)
     append_comms(project, f"task {task.get('id')} {action}: {task.get('last_output') or task.get('next_action') or task.get('title', '')}")
@@ -2619,6 +2656,8 @@ def _human_control_action(args) -> str | None:
         return "agent.set"
     if command == "desktop" and action == "sync":
         return "desktop.sync"
+    if command == "controller" and action == "consume":
+        return "controller.consume"
     if command == "bind-tab":
         return "bind-tab"
     if command == "plan" and action in ("confirm", "reject"):
@@ -2763,6 +2802,12 @@ def main():
     submit_parser.add_argument("--replace", action="store_true", help="Deliberately replace current active work")
     desktop_parser = sub.add_parser("desktop", help="Sync or inspect the local Codex Desktop conversation")
     desktop_parser.add_argument("action", choices=["sync", "status", "bind", "rebind"])
+
+    controller_parser = sub.add_parser("controller", help="Inspect or consume reliable controller receipts")
+    controller_sub = controller_parser.add_subparsers(dest="action", required=True)
+    controller_sub.add_parser("status")
+    controller_consume = controller_sub.add_parser("consume")
+    controller_consume.add_argument("--event-id", required=True)
 
     plan_parser = sub.add_parser("plan", help="Propose or confirm a non-goal milestone workflow")
     plan_sub = plan_parser.add_subparsers(dest="action", required=True)
@@ -3096,6 +3141,8 @@ def main():
         cmd_submit(project, args)
     elif args.command == "desktop":
         cmd_desktop(project, args)
+    elif args.command == "controller":
+        cmd_controller(project, args)
     elif args.command == "plan":
         cmd_plan(project, args)
     elif args.command == "review":

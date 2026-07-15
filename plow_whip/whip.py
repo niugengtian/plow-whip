@@ -562,6 +562,7 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
     try:
         rotations = []
         desktop_sync = []
+        controller_outcomes = []
         with contextlib.redirect_stdout(io.StringIO()):
             from . import codex_desktop
 
@@ -582,6 +583,7 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             supervision = None
             if crack:
                 from . import supervisor
+                from . import controller
 
                 supervision_targets = [item for item in all_results if item.get("supervisable", True)]
                 if target_agent:
@@ -589,6 +591,10 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
                 if opt_in_only and not force:
                     supervision_targets = [item for item in supervision_targets if item.get("automation_enabled")]
                 supervision = supervisor.dispatch_projects([item["project"] for item in supervision_targets])
+                controller.reconcile_result_files()
+                controller_outcomes = controller.process_projects(
+                    [item["project"] for item in all_results]
+                )
             dispatches = supervision.get("workers", []) if supervision else []
         payload = {
             "status": "ok",
@@ -603,6 +609,7 @@ def run_once(stale_minutes=STALE_THRESHOLD_MINUTES, target_agent=None, crack=Fal
             "supervision": supervision,
             "rotations": rotations,
             "desktop_sync": desktop_sync,
+            "controller": controller_outcomes,
         }
         try:
             os.makedirs(af.CONFIG_DIR, exist_ok=True)

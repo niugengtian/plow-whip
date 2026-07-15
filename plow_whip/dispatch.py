@@ -846,6 +846,7 @@ def update_inbox_task(agent: str, dispatch_id: str, status: str, output: str = "
         raise ValueError(f"invalid dispatch status: {status}")
     _ensure_inbox()
     inbox_file = _inbox_file(agent)
+    updated = None
     with file_lock(inbox_file + ".lock"):
         tasks = read_inbox(agent)
         for task in tasks:
@@ -855,8 +856,24 @@ def update_inbox_task(agent: str, dispatch_id: str, status: str, output: str = "
                 if output:
                     task["output"] = output
                 atomic_write_json(inbox_file, tasks)
-                return task
-    raise KeyError(f"dispatch not found: {dispatch_id}")
+                updated = dict(task)
+                break
+    if updated is None:
+        raise KeyError(f"dispatch not found: {dispatch_id}")
+    if status in ("completed", "failed") and os.path.exists(af.state_file(updated["project"])):
+        from . import controller
+
+        try:
+            controller.record_dispatch_result(
+                updated["project"], updated["task_id"], dispatch_id,
+                success=status == "completed", result_ref=inbox_file,
+                execution_agent=agent,
+                evidence={"dispatch_status": status},
+            )
+        except OSError:
+            # The scheduler reconciles persisted task/result truth on its next tick.
+            pass
+    return updated
 
 
 def _dispatch_notify(agent: str, prompt: str, project: str) -> dict:

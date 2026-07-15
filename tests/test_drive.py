@@ -4,12 +4,14 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import plow_whip.agent_flow as af
 from plow_whip.agent_flow import save_config
-from plow_whip.drive import build_drive_prompt, cmd_drive_status
+from plow_whip.drive import build_drive_prompt, cmd_drive, cmd_drive_status
 
 
 class DriveTest(unittest.TestCase):
@@ -54,6 +56,51 @@ class DriveTest(unittest.TestCase):
             f.write("line1\nline2\nDONE\n")
         # 不应抛异常
         cmd_drive_status(self.project, "cursor_cli", log_dir)
+
+    def test_controller_cannot_babysit_foreground_dispatch(self):
+        args = SimpleNamespace(
+            target_agent="cursor_cli",
+            status=False,
+            next="实现登录 API",
+            prompt_file=None,
+            from_agent="codex",
+            project_path=None,
+            channel="auto",
+            foreground=True,
+        )
+        with mock.patch("plow_whip.codex_desktop.authorize_control", return_value=True):
+            with self.assertRaisesRegex(SystemExit, "2"):
+                cmd_drive(self.project, args)
+
+    def test_background_cli_dispatch_returns_after_single_supervisor_pass(self):
+        state = af.load_state(self.project)
+        state["task"] = {"id": "T-1", "owner": "cursor_cli", "status": "in_progress"}
+        af.save_state(self.project, state)
+        args = SimpleNamespace(
+            target_agent="cursor_cli",
+            status=False,
+            next="实现登录 API",
+            prompt_file=None,
+            from_agent="codex",
+            project_path=None,
+            channel="auto",
+            foreground=False,
+        )
+        protocol = {"agents": {"cursor_cli": {"driver": "cursor_cli"}}}
+        outcome = {
+            "workers": [{
+                "project": self.project,
+                "status": "started",
+                "channel": "cursor_cli",
+                "detail": "started",
+            }]
+        }
+        with mock.patch("plow_whip.agent_flow.load_protocol", return_value=protocol):
+            with mock.patch("plow_whip.supervisor.dispatch_projects", return_value=outcome) as dispatch_once:
+                with mock.patch("plow_whip.drive.dispatch") as direct_dispatch:
+                    cmd_drive(self.project, args)
+        dispatch_once.assert_called_once_with([self.project])
+        direct_dispatch.assert_not_called()
 
 
 if __name__ == "__main__":

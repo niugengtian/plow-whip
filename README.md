@@ -217,6 +217,12 @@ plow-whip scheduler status
 
 撤销或替换时先立即撤销旧租约并标记 `stopping`，再发送 TERM。scheduler 至少等待 30 秒；进程仍存活才发送 KILL，且 PID 消失前不会启动替代 Worker。会话估算 3000 token 软轮换、4000 token 硬轮换，文件安全阈值 16384 bytes，carry-forward 最多 300 token；完整历史保持 cold、按需读取。
 
+### Controller 回执与前台可打断性
+
+controller 是项目当前绑定的协调会话，不等同于固定 PM 名称：存在唯一 PM/协调角色会话时优先绑定，否则使用当前人类对话。controller 只做原子派发并记录 `awaiting_receipt`，随后立即结束 turn；禁止在前台用 `wait` 或 `read_thread` 循环 babysit 执行会话。人的消息在短派发事务结束后立即处理，不通过中止半个派发来抢占。
+
+执行结果先持久化，再写入 `~/.plow-whip/logs/controller-receipts.jsonl` 的追加式私有回执。scheduler 用任务 ID、dispatch ID 和 lease 代次拒绝旧回执，重复投递幂等；断网或重启后会重扫未消费回执。controller 读取结果引用并运行 `controller consume` 后才算消费完成。controller 正忙时在 20 分钟内最多唤醒三次，仍失败才恢复或新建同控制角色会话。CLI 假死判断只使用 PID、状态、时间戳和日志增量；有限探测后只携证据通知 controller，不向模型发送探测消息，也不自行重派。
+
 ### 验收驱动推进
 
 任务有验证命令时，只有全部通过才能进入 Reviewer。每个候选 SHA 固定两次独立 Review，使用固定 blocking checklist，Reviewer 不修改候选；开放式非阻塞发现进入 backlog。两个结论冲突时只允许一次 adjudication，裁决必须返回 pass 或 block，不进入无限评审循环。
@@ -506,6 +512,8 @@ collab/
 | `health probe` | 执行 DNS、国内/海外出口、TLS、Provider 与 CLI 可用性探测 |
 | `inbox list` | 查看某 Agent 的文件投递 |
 | `inbox update` | 按 dispatch ID 更新 queued/accepted/running/completed/failed |
+| `controller status` | 查看当前项目尚未消费的 controller 回执 |
+| `controller consume --event-id <id>` | controller 读取持久化结果后幂等确认消费 |
 
 ### 会话与记忆
 

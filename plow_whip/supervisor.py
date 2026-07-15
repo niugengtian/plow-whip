@@ -465,6 +465,99 @@ def renew_live_leases(live: list[dict]) -> list[dict]:
     return renewed
 
 
+def _record_finished_receipts(finished: list[dict]) -> list[dict]:
+    """Bridge persisted worker results into the private controller outbox."""
+    from . import controller
+
+    recorded = []
+    for worker in finished:
+        result = worker.get("result") or {}
+        persisted_complete = False
+        try:
+            state = af.load_state(worker["project"])
+            task = state.get("task") or {}
+            persisted_complete = task.get("id") == worker.get("task_id") and task.get("status") == "done"
+            if not persisted_complete:
+                persisted_complete = any(
+                    item.get("id") == worker.get("task_id")
+                    for container in (state.get("workflow") or {}, state.get("goal") or {})
+                    for item in container.get("completed", [])
+                )
+        except (OSError, ValueError):
+            pass
+        result_ref = worker.get("result_file", "")
+        if not result_ref or not os.path.exists(result_ref):
+            result_ref = af.state_file(worker["project"])
+        recorded.append(controller.record_dispatch_result(
+            worker["project"], worker["task_id"], worker.get("dispatch_id", ""),
+            success=bool(result.get("success")) or persisted_complete,
+            result_ref=result_ref,
+            execution_agent=worker.get("agent"),
+            evidence={
+                "status": result.get("status"),
+                "returncode": result.get("returncode"),
+                "pid": result.get("pid") or worker.get("cli_pid") or worker.get("pid"),
+                "persisted_complete": persisted_complete,
+            },
+        ))
+    return recorded
+
+
+def _probe_stalled_workers(
+    live: list[dict], *, minimum_age_seconds: int = 300, required_unchanged: int = 3,
+) -> list[dict]:
+    """Use only PID/log/state evidence; report suspected hangs without retrying."""
+    from . import controller
+
+    alerts = []
+    now = datetime.now()
+    changed_registry = False
+    for worker in live:
+        try:
+            state = af.load_state(worker["project"])
+            task = state.get("task") or {}
+            if task.get("id") != worker.get("task_id") or task.get("status") not in ("active", "in_progress"):
+                continue
+            started = datetime.fromisoformat(worker.get("started_at", ""))
+            if (now - started).total_seconds() < minimum_age_seconds:
+                continue
+            stat = os.stat(worker.get("log_file", ""))
+        except (OSError, TypeError, ValueError, KeyError):
+            continue
+        fingerprint = f"{stat.st_size}:{stat.st_mtime_ns}"
+        probe = worker.setdefault("zero_token_probe", {})
+        if probe.get("fingerprint") == fingerprint:
+            probe["unchanged"] = int(probe.get("unchanged", 0)) + 1
+        else:
+            probe.update({"fingerprint": fingerprint, "unchanged": 0, "alerted": False})
+        probe["checked_at"] = now.isoformat(timespec="seconds")
+        changed_registry = True
+        if probe["unchanged"] < required_unchanged or probe.get("alerted"):
+            continue
+        evidence = {
+            "worker_pid": worker.get("pid"),
+            "cli_pid": worker.get("cli_pid"),
+            "pid_alive": _pid_alive(worker.get("pid")) or _pid_alive(worker.get("cli_pid")),
+            "log_size": stat.st_size,
+            "log_mtime_ns": stat.st_mtime_ns,
+            "unchanged_probes": probe["unchanged"],
+        }
+        receipt = controller.record_health_incident(worker, evidence)
+        probe["alerted"] = True
+        probe["alerted_at"] = now.isoformat(timespec="seconds")
+        alerts.append({
+            "project": worker["project"], "task_id": worker["task_id"],
+            "dispatch_id": worker.get("dispatch_id"), "event_id": receipt["event_id"],
+            "evidence": evidence,
+        })
+    if changed_registry:
+        updated = {item.get("dispatch_id"): item for item in live}
+        _update_registry(lambda registry: registry.update({
+            "workers": [updated.get(item.get("dispatch_id"), item) for item in registry.get("workers", [])]
+        }))
+    return alerts
+
+
 def _spawn(project: str, state: dict, driver: str) -> dict:
     task = state["task"]
     dispatch_id = f"DP-{uuid.uuid4().hex[:12]}"
@@ -523,8 +616,10 @@ def _spawn(project: str, state: dict, driver: str) -> dict:
 def dispatch_projects(projects: list[str]) -> dict:
     """Reap, probe open circuits, enforce limits, and spawn one worker per eligible Task."""
     reaped = reap_workers()
+    receipts = _record_finished_receipts(reaped["finished"])
     probes = health.probe_open_circuits(af.CONFIG_DIR, required=3)
     renewed = renew_live_leases(reaped["live"])
+    stalled = _probe_stalled_workers(reaped["live"])
     stopped = _stop_open_circuit_workers(reaped["live"])
     stopped.extend(_stop_revoked_workers(reaped["live"]))
     live = [
@@ -602,4 +697,5 @@ def dispatch_projects(projects: list[str]) -> dict:
     return {
         "workers": outcomes, "finished": reaped["finished"], "health_probes": probes,
         "renewed": renewed, "stopped": stopped, "counts": counts,
+        "controller_receipts": receipts, "suspected_hangs": stalled,
     }

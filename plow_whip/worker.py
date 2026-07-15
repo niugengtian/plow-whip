@@ -116,6 +116,11 @@ def main() -> int:
             result["failure"] = _record_failure(args.project, args.task_id, args.driver, result)
         except Exception as record_exc:
             result["record_error"] = f"{type(record_exc).__name__}: {record_exc}"
+    result.setdefault("project", args.project)
+    result.setdefault("task_id", args.task_id)
+    result.setdefault("dispatch_id", args.dispatch_id)
+    result.setdefault("agent", args.agent)
+    result.setdefault("driver", args.driver)
     os.makedirs(os.path.dirname(args.result_file), exist_ok=True)
     atomic_write_json(args.result_file, result)
     return 0 if result.get("success") else 1

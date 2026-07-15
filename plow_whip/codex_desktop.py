@@ -50,7 +50,10 @@ def _control_identity() -> dict | None:
     return None
 
 
-def bind_control(project: str, *, rebind: bool = False) -> dict:
+def bind_control(
+    project: str, *, rebind: bool = False,
+    role: str | None = None, agent: str | None = None,
+) -> dict:
     """Bind the first interactive surface or explicitly replace a lost one."""
     from . import agent_flow as af
     from . import leases
@@ -62,19 +65,31 @@ def bind_control(project: str, *, rebind: bool = False) -> dict:
     current = checkpoint.get("control_binding")
     if not current and checkpoint.get("thread_id"):
         current = {"kind": "codex_desktop", "ref": thread_ref(checkpoint["thread_id"])}
-    if current == identity:
-        return {"bound": True, "binding": identity, "changed": False}
-    if current and not rebind:
+    if current == identity and checkpoint.get("control_binding") and (
+        not role or checkpoint.get("control_role") == role
+    ):
+        return {
+            "bound": True, "binding": identity, "changed": False,
+            "role": checkpoint.get("control_role"), "agent": checkpoint.get("control_agent"),
+        }
+    if current and current != identity and not rebind:
         return {"bound": False, "reason": "different_control_surface", "binding": current}
     changed_at = datetime.now().isoformat(timespec="seconds")
     history = list(checkpoint.get("control_binding_history") or [])
-    if current:
+    if current and current != identity:
         history.append({**current, "replaced_at": changed_at, "replaced_by": identity["ref"]})
     checkpoint.update({
         "control_binding": identity,
         "control_binding_history": history[-20:],
         "control_bound_at": changed_at,
+        "control_role": role or checkpoint.get("control_role"),
+        "control_agent": agent or checkpoint.get("control_agent"),
     })
+    current_thread_id = _environment_thread_id(allow_env=True)
+    if identity.get("kind") == "codex_desktop" and current_thread_id:
+        if checkpoint.get("thread_id") != current_thread_id:
+            checkpoint["offset"] = 0
+        checkpoint["thread_id"] = current_thread_id
     path = _checkpoint_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(str(path) + ".lock"):
@@ -83,7 +98,127 @@ def bind_control(project: str, *, rebind: bool = False) -> dict:
         af.CONFIG_DIR, project, "control_rebound" if current else "control_bound",
         old_ref=(current or {}).get("ref"), new_ref=identity["ref"], kind=identity["kind"],
     )
-    return {"bound": True, "binding": identity, "changed": True, "rebound": bool(current)}
+    return {
+        "bound": True, "binding": identity, "changed": True, "rebound": bool(current and current != identity),
+        "role": checkpoint.get("control_role"), "agent": checkpoint.get("control_agent"),
+    }
+
+
+def _controller_role(project: str, agent: str | None) -> str | None:
+    """Return a declared control-role tag without making PM the callback type."""
+    if not agent:
+        return None
+    from . import agent_flow as af
+
+    try:
+        data = af.load_protocol(project)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "pm" if agent.lower() == "pm" else None
+    meta = data.get("agents", {}).get(agent, {})
+    roles = [str(item).lower() for item in (meta.get("roles") or [])]
+    configured = [
+        str(item).lower()
+        for item in data.get("orchestration", {}).get(
+            "controller_roles", ["pm", "product-manager", "coordinator", "control-plane"],
+        )
+    ]
+    for role in roles + [agent.lower()]:
+        if any(role == item or item in role for item in configured):
+            return role
+    return None
+
+
+def register_control_session(project: str, agent: str | None = None) -> dict:
+    """Infer the current controller when a human-owned Desktop session enters."""
+    identity = _control_identity()
+    if not identity:
+        return {"bound": False, "reason": "no_interactive_control_identity", "is_controller": False}
+    checkpoint = _load_checkpoint(project)
+    current = checkpoint.get("control_binding")
+    if not current and checkpoint.get("thread_id"):
+        current = {"kind": "codex_desktop", "ref": thread_ref(checkpoint["thread_id"])}
+    role = _controller_role(project, agent)
+    if current and current != identity and not role:
+        return {
+            "bound": True, "binding": current, "changed": False,
+            "is_controller": False, "role": checkpoint.get("control_role"),
+        }
+    result = bind_control(
+        project, rebind=bool(current and current != identity and role),
+        role=role or checkpoint.get("control_role"), agent=agent if role else checkpoint.get("control_agent"),
+    )
+    result["is_controller"] = bool(result.get("bound") and result.get("binding") == identity)
+    return result
+
+
+def bound_control(project: str) -> dict:
+    from . import agent_flow as af
+
+    checkpoint = _load_checkpoint(project)
+    thread_id = checkpoint.get("thread_id")
+    binding = checkpoint.get("control_binding")
+    if not binding and thread_id:
+        binding = {"kind": "codex_desktop", "ref": thread_ref(thread_id)}
+    role = checkpoint.get("control_role")
+    agent = checkpoint.get("control_agent")
+    if not role:
+        try:
+            candidates = []
+            for name in af.load_protocol(project).get("agents", {}):
+                inferred = _controller_role(project, name)
+                if inferred:
+                    candidates.append((name, inferred))
+            explicit = [item for item in candidates if item[0] != "codex"]
+            if len(explicit) == 1:
+                agent, role = explicit[0]
+            elif len(candidates) == 1:
+                agent, role = candidates[0]
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    return {
+        "bound": bool(binding),
+        "kind": (binding or {}).get("kind"),
+        "thread_id": thread_id,
+        "thread_ref": (binding or {}).get("ref") or thread_ref(thread_id),
+        "role": role,
+        "agent": agent,
+        "bound_at": checkpoint.get("control_bound_at"),
+    }
+
+
+def set_control_thread(
+    project: str, thread_id: str, *, role: str | None = None,
+    agent: str | None = None, reason: str = "recovery",
+) -> dict:
+    """Persist a newly created replacement controller in the private checkpoint."""
+    from . import agent_flow as af
+    from . import leases
+
+    checkpoint = _load_checkpoint(project)
+    old = checkpoint.get("control_binding")
+    new = {"kind": "codex_desktop", "ref": thread_ref(thread_id)}
+    changed_at = datetime.now().isoformat(timespec="seconds")
+    history = list(checkpoint.get("control_binding_history") or [])
+    if old and old != new:
+        history.append({**old, "replaced_at": changed_at, "replaced_by": new["ref"], "reason": reason})
+    checkpoint.update({
+        "thread_id": thread_id,
+        "offset": 0,
+        "control_binding": new,
+        "control_binding_history": history[-20:],
+        "control_bound_at": changed_at,
+        "control_role": role or checkpoint.get("control_role"),
+        "control_agent": agent or checkpoint.get("control_agent"),
+    })
+    path = _checkpoint_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(str(path) + ".lock"):
+        atomic_write_json(str(path), checkpoint)
+    leases.audit(
+        af.CONFIG_DIR, project, "controller_recovered",
+        old_ref=(old or {}).get("ref"), new_ref=new["ref"], reason=reason,
+    )
+    return bound_control(project)
 
 
 def _checkpoint_paths(project: str) -> tuple[Path, Path]:
@@ -271,6 +406,7 @@ def sync(project: str, allow_env: bool = True) -> dict:
 
 
 def interaction(project: str) -> dict:
+    register_control_session(project)
     result = sync(project, allow_env=True)
     if not result.get("thread_ref"):
         return {}
