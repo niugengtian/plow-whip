@@ -20,6 +20,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 ## 导航
 
 - [核心模型](#core-model)
+- [一张图看懂完整闭环](#workflow-diagram)
 - [快速上手：完成首个可验证任务](#quick-start)
 - [真实无人值守如何工作](#unattended)
 - [可靠性设计与边界](#reliability)
@@ -33,18 +34,7 @@ plow-whip 是一个面向本地开发项目的多 Agent 协作状态机与无人
 
 plow-whip 将“谁负责”与“用什么执行”分开：
 
-```text
-Submit（严格模式由绑定的人机控制面进入：macOS 默认 Codex Desktop，其他系统为交互式终端；旧模式可由其他入口进入）
-  └─ 本地零 Token 分类：direct / simple / needs_planner
-      ├─ direct：明确且有界，直接交给指定 CLI
-      ├─ simple：交给文件持久化的 DeepSeek simple-tasker
-      └─ needs_planner：Codex CLI 规划，必须由人确认里程碑
-          └─ Task（当前唯一原子工作单元）
-          ├─ Registry：有哪些长期 Agent，它们的角色、能力、Driver 和 schedulable
-          ├─ Router：按角色、能力、优先级、成本和可用性确定性选人
-          ├─ Driver：codex_cli / cursor_cli / simple_tasker / zellij / file
-          └─ State：进度、下一步、PID、验收、会话、熔断与 Git 生命周期
-```
+任务先进入本地状态机，再由确定性 Router 选择长期角色和 Driver。controller 只负责短事务派发与最终收口，不在前台守着 Worker。
 
 两个 canonical 真源和一个启动入口约束整个协作过程：
 
@@ -62,10 +52,42 @@ Agent 名称代表长期职责身份，不绑定某个模型或客户端。一�
 
 主 Agent 的 Driver 不可用或执行失败时，Router 只会在职责相同、能力满足的候选 Agent 中选择后备，不会把后端任务误派给设计或审计角色。
 
+<a id="workflow-diagram"></a>
+## 一张图看懂完整闭环
+
+```mermaid
+flowchart TD
+    H["人类在控制窗口下达目标"] --> B["plow-whip 绑定项目 controller"]
+    B --> S["submit：写入 Task 真源"]
+    S --> C{"本地零 Token 分类"}
+    C -->|direct| R["Router 选择固定角色与 Driver"]
+    C -->|simple| ST["simple-tasker"]
+    C -->|needs_planner| P["Planner 提案"]
+    P --> Q{"人类确认计划"}
+    Q -->|确认| R
+    Q -->|未确认| BH["blocked_waiting_human"]
+    ST --> W["后台 Worker / 固定角色会话"]
+    R --> A["原子写入 dispatch + awaiting_receipt"]
+    A --> E["controller 立即结束当前 turn"]
+    A --> W
+    W --> V["执行 verify_commands / Review"]
+    V --> T["持久化结果与完成回执"]
+    T --> I{"当前 execution 且未消费？"}
+    I -->|重复或旧回执| X["幂等忽略"]
+    I -->|有效| U["安全边界唤醒 controller"]
+    U --> F["controller 对账任务真源并收口"]
+    F --> D["consume 回执；Task done / 下一里程碑"]
+    W -. "PID、时间戳、日志无增量" .-> Z["零 Token 有界探测"]
+    Z --> N["携证据通知 controller；不自动重派"]
+    N --> F
+```
+
+controller 唤醒在 20 分钟内最多尝试三次；仍失败时只允许一次同控制角色会话恢复。断网或重启后，scheduler 会重新扫描尚未消费的回执，无需 Worker 重发。
+
 <a id="quick-start"></a>
 ## 快速上手：完成首个可验证任务
 
-要求 Python 3.10+。当前仓库可用 editable install：
+要求 Python 3.10+。先安装 plow-whip：
 
 ```bash
 git clone https://github.com/niugengtian/plow-whip.git
@@ -73,23 +95,24 @@ cd plow-whip
 python3 -m pip install -e .
 ```
 
-### 1. 配置项目目录和默认 Agent
+### 1. 配置一次项目目录
 
 ```bash
 plow-whip configure \
   --projects-dir /absolute/path/to/projects \
-  --agents codex codex_cli reviewer
+  --agents codex codex_cli cursor_cli reviewer
 ```
 
 全局配置只为新项目提供默认阵容；初始化后，以各项目的 `collab/AGENT_PROTOCOL.json` 为准。
 
-### 2. 初始化已有项目
+### 2. 初始化项目并检查环境
 
 假设 `/absolute/path/to/projects/MyProject` 已存在：
 
 ```bash
 plow-whip --project MyProject init
 plow-whip --project MyProject doctor --json
+plow-whip scheduler status
 ```
 
 也可以让 plow-whip 创建项目目录：
@@ -100,7 +123,7 @@ plow-whip --project MyProject new \
   --first-action "完成首个可验证任务"
 ```
 
-结构缺失时使用显式修复：
+结构缺失时使用显式修复；它只补机制文件，不覆盖损坏的 canonical JSON：
 
 ```bash
 plow-whip --project MyProject repair --json
@@ -110,7 +133,17 @@ plow-whip --project MyProject repair --json
 
 由当前版本 `init/new` 创建的项目默认写入 `enforcement.mode=strict` 和独立 `protocol_epoch`。升级前已经存在、且协议中没有 `enforcement` 的项目继续按旧模式运行，不会被自动迁移。
 
-### 3. 提交任务
+### 3. 在 Codex Desktop 打开项目
+
+`init/new/doctor --repair` 会在项目根生成一个简短的 `AGENTS.md`。Codex 会自动读取该文件，并首先进入：
+
+```bash
+plow-whip --project MyProject start --agent codex --json
+```
+
+这个根 `AGENTS.md` 只有 plow-whip 标记区块由框架更新；团队已有的其他说明会保留。它是 Codex Desktop/CLI 的持久项目指令入口，依据 [Codex 的 AGENTS.md 发现规则](https://learn.chatgpt.com/docs/agent-configuration/agents-md)。plow-whip 不生成 `.cursor/rules` 或其他 Cursor 专用指令；Cursor CLI 仍作为 Driver，由任务协议和启动包约束。
+
+### 4. 从控制窗口提交任务
 
 ```bash
 plow-whip --project MyProject submit "实现健康检查并运行测试"
@@ -127,7 +160,9 @@ plow-whip --project MyProject plan confirm
 
 严格项目的 `submit`、计划确认、决策答复、自动化开关等控制命令必须来自当前绑定的人机控制面。macOS 校验 Codex Desktop Thread 与原生 App 父进程链；Linux/Windows 绑定真实交互式终端会话。项目只公开不可逆引用；后台 CLI Worker 的标准流被重定向，既不继承 Desktop 身份也不能取得交互终端身份。首次控制动作完成绑定；macOS 更换 Desktop 会话时先显式执行 `desktop sync`。
 
-### 4. Worker 回写进度并完成验收
+controller 落盘派发后会立即结束 turn。不要在控制窗口循环读取或等待执行角色；完成结果会通过私有回执自动唤醒当前 controller。
+
+### 5. Worker 自动回写并完成验收
 
 以下命令只供 scheduler 签发租约后启动的 Worker 使用。Codex Desktop 或其他无租约会话执行 `start` 时会得到 `authorization.mode=observer`，启动包不会包含 `writeback`：
 
@@ -144,6 +179,7 @@ plow-whip --project MyProject task complete \
 
 ```bash
 plow-whip --project MyProject status
+plow-whip --project MyProject controller status
 ```
 
 <a id="unattended"></a>

@@ -96,6 +96,28 @@ class TestInit(PlowWhipTestBase):
         self.assertFalse(os.path.exists(os.path.join(project_root, "collab.template")))
         self.assertTrue(os.path.exists(os.path.join(project_root, "collab", "AGENT_COMMS.md")))
 
+    def test_init_writes_codex_root_instructions_without_cursor_rules(self):
+        cmd_init("TestProject")
+        project_root = os.path.join(self.projects_dir, "TestProject")
+        with open(os.path.join(project_root, "AGENTS.md"), encoding="utf-8") as file:
+            instructions = file.read()
+        self.assertIn("plow-whip --project TestProject start --agent codex --json", instructions)
+        self.assertIn("plow-whip:codex-instructions:start", instructions)
+        self.assertFalse(os.path.exists(os.path.join(project_root, ".cursor")))
+
+    def test_repair_preserves_custom_root_agents_instructions(self):
+        project_root = os.path.join(self.projects_dir, "TestProject")
+        os.makedirs(project_root, exist_ok=True)
+        root_agents = os.path.join(project_root, "AGENTS.md")
+        with open(root_agents, "w", encoding="utf-8") as file:
+            file.write("# Team rules\n\n- Keep this custom rule.\n")
+        cmd_init("TestProject")
+        af._ensure_plow_whip_structure("TestProject")
+        with open(root_agents, encoding="utf-8") as file:
+            instructions = file.read()
+        self.assertIn("Keep this custom rule", instructions)
+        self.assertEqual(instructions.count("plow-whip:codex-instructions:start"), 1)
+
     def test_init_creates_collab_structure(self):
         cmd_init("TestProject")
         collab_dir = os.path.join(self.projects_dir, "TestProject", "collab")

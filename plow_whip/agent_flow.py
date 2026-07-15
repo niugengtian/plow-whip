@@ -200,6 +200,10 @@ def conventions_human_file(project):
     return os.path.join(project_collab_dir(project), "CONVENTIONS.md")
 
 
+def codex_instructions_file(project):
+    return os.path.join(project_dir(project), "AGENTS.md")
+
+
 def protocol_file(project):
     return proto.protocol_path(project_dir(project))
 
@@ -540,6 +544,32 @@ def write_agent_manifest(project):
         schedulable = "yes" if meta.get("schedulable", True) else "no"
         lines.append(f"| `{agent}` | {roles} | {meta.get('driver', 'file')} | {schedulable} | {capabilities} | {assignment} |")
     atomic_write_text(path, "\n".join(lines) + "\n")
+    if "codex" in get_project_agents(project):
+        write_codex_instructions(project)
+
+
+CODEX_INSTRUCTIONS_START = "<!-- plow-whip:codex-instructions:start -->"
+CODEX_INSTRUCTIONS_END = "<!-- plow-whip:codex-instructions:end -->"
+
+
+def write_codex_instructions(project):
+    """Maintain only plow-whip's block in the repo-level Codex AGENTS.md."""
+    block = render_template("CODEX_AGENTS.md.tpl", project)
+    if block is None:
+        raise FileNotFoundError("framework collab template is incomplete: CODEX_AGENTS.md.tpl")
+    path = codex_instructions_file(project)
+    current = _read_text_file(path)
+    start = current.find(CODEX_INSTRUCTIONS_START)
+    end = current.find(CODEX_INSTRUCTIONS_END)
+    if start >= 0 and end >= start:
+        end += len(CODEX_INSTRUCTIONS_END)
+        updated = current[:start].rstrip() + "\n\n" + block.strip() + current[end:]
+    elif current.strip():
+        updated = current.rstrip() + "\n\n" + block.strip() + "\n"
+    else:
+        updated = block.strip() + "\n"
+    if updated != current:
+        atomic_write_text(path, updated)
 
 
 def cmd_agent(args, project=None):
