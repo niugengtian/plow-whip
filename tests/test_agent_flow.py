@@ -87,6 +87,15 @@ class TestConfigure(PlowWhipTestBase):
 
 
 class TestInit(PlowWhipTestBase):
+    def test_collab_template_is_framework_owned_and_not_copied_to_project(self):
+        self.assertEqual(os.path.basename(af.template_dir()), "collab.template")
+        self.assertTrue(os.path.exists(os.path.join(af.template_dir(), "AGENT_COMMS.md.tpl")))
+        self.assertTrue(os.path.exists(os.path.join(af.template_dir(), "conversations", "current.md.tpl")))
+        cmd_init("TestProject")
+        project_root = os.path.join(self.projects_dir, "TestProject")
+        self.assertFalse(os.path.exists(os.path.join(project_root, "collab.template")))
+        self.assertTrue(os.path.exists(os.path.join(project_root, "collab", "AGENT_COMMS.md")))
+
     def test_init_creates_collab_structure(self):
         cmd_init("TestProject")
         collab_dir = os.path.join(self.projects_dir, "TestProject", "collab")

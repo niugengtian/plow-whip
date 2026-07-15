@@ -1,8 +1,8 @@
-# e2e-worker Session — plow-whip
+# {AGENT_NAME} Session — {PROJECT_NAME}
 
-**AI:** E2E Worker
-**Assignment:** Run read-only implementation acceptance
-**Started:** 2026-07-13
+**AI:** {AGENT_ROLE}
+{ASSIGNMENT_LINE}
+**Started:** {START_DATE}
 **Topic:** —
 
 ## Previous

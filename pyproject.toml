@@ -37,7 +37,7 @@ plow-whip = "plow_whip.agent_flow:main"
 include = ["plow_whip*"]
 
 [tool.setuptools.package-data]
-plow_whip = ["templates/**/*", "adr/*"]
+plow_whip = ["collab.template/**/*", "adr/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

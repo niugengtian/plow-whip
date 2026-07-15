@@ -15,4 +15,6 @@ env/
 *.db
 .DS_Store
 by_rm/
-collab/.runtime/
+# Project/runtime collaboration state is generated from the framework-owned
+# plow_whip/collab.template/ and must never be committed from this checkout.
+collab/

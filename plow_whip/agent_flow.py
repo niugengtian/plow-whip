@@ -226,22 +226,26 @@ def get_project_agents(project):
 # ── Templates ──────────────────────────────────────────────────────────────────
 
 def template_dir():
-    return os.path.join(PACKAGE_DIR, "templates")
+    """Return the framework-owned collab seed; projects never own a copy."""
+    return os.path.join(PACKAGE_DIR, "collab.template")
 
 
-def render_template(template_name, project):
+def render_template(template_name, project, **values):
     """Render a template file with {PROJECT_NAME} substitution."""
     tpl_path = os.path.join(template_dir(), template_name)
     if not os.path.exists(tpl_path):
         return None
     with open(tpl_path, encoding="utf-8") as f:
         content = f.read()
-    return content.replace("{PROJECT_NAME}", project)
+    replacements = {"PROJECT_NAME": project, **values}
+    for key, value in replacements.items():
+        content = content.replace("{" + key + "}", str(value))
+    return content
 
 
-def write_rendered(target_path, template_name, project):
+def write_rendered(target_path, template_name, project, **values):
     """Render template and write to target path."""
-    content = render_template(template_name, project)
+    content = render_template(template_name, project, **values)
     if content is not None:
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "w", encoding="utf-8") as f:
@@ -2511,17 +2515,15 @@ def _write_session_template(agent, project, path):
         meta = load_protocol(project).get("agents", {}).get(agent, {})
     role = meta.get("role") or get_agent_label(agent)
     assignment = meta.get("assignment") or get_agent_assignment(agent)
-    lines = [f"# {agent} Session — {project}", "", f"**AI:** {role}"]
-    if assignment:
-        lines.append(f"**Assignment:** {assignment}")
-    lines += [
-        f"**Started:** {datetime.now().strftime('%Y-%m-%d')}", "**Topic:** —", "",
-        "## Previous", "- (none, new session)", "", "## Current Tasks",
-        "- (check the start --json payload)", "", "## Key Decisions",
-        "- (decisions will be appended here)", "", "## Outputs",
-        "- (outputs will be appended here)", "",
-    ]
-    atomic_write_text(path, "\n".join(lines))
+    rendered = write_rendered(
+        path, "conversations/current.md.tpl", project,
+        AGENT_NAME=agent,
+        AGENT_ROLE=role,
+        ASSIGNMENT_LINE=f"**Assignment:** {assignment}" if assignment else "",
+        START_DATE=datetime.now().strftime("%Y-%m-%d"),
+    )
+    if not rendered:
+        raise FileNotFoundError("framework collab template is incomplete: conversations/current.md.tpl")
 
 
 def cmd_sessions_overview(project):

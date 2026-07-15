@@ -435,6 +435,8 @@ collab/
 
 新项目就绪所需的 memory 结构只有 `DECISIONS.md` 和 `sessions/`。旧版 `NEXT_ACTION.md`、`CURRENT_STATUS.md`、`ROADMAP.md` 可保留，但不参与启动和 doctor 就绪判定。
 
+`collab/` 是每个项目的运行态，不是可复制的模板，也不应进入 Git。唯一初始模板由 plow-whip 框架维护在 `plow_whip/collab.template/`，并随 plow-whip 一起提交和发布；其他项目的 `init`、`new`、`doctor --repair` 只读取该模板生成缺失文件，不会得到或修改 `collab.template/`。项目专属规则写入自己的 `AGENT_PROTOCOL.json`／项目配置层，不能反向修改框架模板。plow-whip 仓库自身也只提交该模板，根目录运行态 `collab/` 由 `.gitignore` 排除。
+
 本机私有运行目录还保存签名租约密钥、可选 authority pin、控制面绑定、授权审计 `logs/authorization.jsonl` 和 `worktrees/<project>/<task>/`。这些文件不进入项目仓库；状态只记录不可逆 lease ID 与相对 `workspace_ref`。authority pin 只有显式启用保留加固时才参与加载。
 
 协议规则仍保留 scope、priority、origin、enforcement 四个维度。模型启动包只携带最多 8 条 `{id, action, on_violation}`；租约、PID、scheduler、Git、revision 和状态校验由本地代码执行，不把这些检查折算成 prompt token。
